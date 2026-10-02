@@ -8,6 +8,7 @@ Repo: https://github.com/burque505/Csharp-in-AHK (branch `main`, MIT license).
 - `Csx-in-AHK.ahk`: `RunCsx` / `RunCsxFile`. C# script (.csx) syntax using the Roslyn scripting API. `return <any value>` or a final expression is returned to AHK. Console output goes to `CsxOutput`.
 - `cs_ex1.ahk`, `csx_ex1.ahk`: demos. `Example.csx` + `ExampleHelpers.csx` are used by `csx_ex1.ahk` (via `#load`).
 - `winforms_ex1.ahk`, `wpf_ex1.ahk`: minimal WinForms / WPF dialogs via `RunCsx` that return the user's input to AHK. Scripts run on AHK's STA thread, so UI uses modal `ShowDialog()`. Never use `Application.Run()`, because WPF allows only one `Application` per process.
+- `types_ex1.ahk`: passing AHK values of each type to C# through `args` (all arrive as strings) and converting the results back. Arrays are spread with `Arr*`. Maps travel as `key=value` lines.
 - The two libraries are standalone and must stay includable together: keep their globals and functions distinct (`CS*` / `_CSharp*` vs `Csx*` / `_Csx*`, host classes `CSHost` vs `CsxHost`).
 
 ## How it works
