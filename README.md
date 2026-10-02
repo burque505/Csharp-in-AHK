@@ -158,6 +158,8 @@ If one library has already started .NET, the other reuses the same runtime.
 |---|---|
 | [`cs_ex1.ahk`](cs_ex1.ahk) | Demos for `RunCSharp`: output, args, exit codes, exceptions, `AHK.Return` |
 | [`csx_ex1.ahk`](csx_ex1.ahk) | Demos for `RunCsx`: return values, collections, records, `await`, files, compile errors |
+| [`winforms_ex1.ahk`](winforms_ex1.ahk) | Minimal WinForms dialog that returns the user's input to AHK |
+| [`wpf_ex1.ahk`](wpf_ex1.ahk) | Minimal WPF window that returns the user's input to AHK |
 | [`Example.csx`](Example.csx) / [`ExampleHelpers.csx`](ExampleHelpers.csx) | A script file that uses `#load` to pull in helper functions and classes |
 
 The demos show their results with `MsgBox`.
