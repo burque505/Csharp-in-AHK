@@ -169,7 +169,9 @@ The demos show their results with `MsgBox`.
 ## Credits
 
 - **Code:** written by **[Claude](https://www.anthropic.com/claude)** (Anthropic), working through Claude Code under the direction of [burque505](https://github.com/burque505).
-- **Inspiration:** the idea, but no code, comes from *Powershell-in-AHK*.
+- **Inspiration:** the idea, but no code, comes from *Powershell-in-AHK*, https://www.autohotkey.com/boards/viewtopic.php?f=83&t=141178, by user 
+
+-+_[] .
 - **CLR interop:** based on concepts and techniques from **CLR.ahk** by Lexikos.
 
 ## License
