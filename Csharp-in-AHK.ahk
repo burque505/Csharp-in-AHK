@@ -38,6 +38,18 @@
 global CSStreams := 3       ; Bitmask: 1=Console.Out 2=Console.Error
 global CSExitCode := 0      ; Exit code of the last script (its int return value, or the HRESULT of an unhandled exception)
 global CSOutput := ""       ; Console output of the last script
+
+; HARD-CODED PATHS: the two paths below point to the author's Visual Studio 2026 Community install.
+; Change them to match your machine. If you later update Visual Studio and scripts stop starting, check them first.
+;   CSDotnetRoot must contain:
+;     host\fxr\<version>\hostfxr.dll
+;     shared\Microsoft.NETCore.App\<version>\           (.NET 8 or later)
+;     shared\Microsoft.WindowsDesktop.App\<version>\    (optional, needed for WinForms/WPF)
+;   CSRoslynDir must contain:
+;     csc.exe                                    (compiles the embedded host once)
+;     Microsoft.CodeAnalysis.dll
+;     Microsoft.CodeAnalysis.CSharp.dll
+;   A standalone .NET install (e.g. C:\Program Files\dotnet) also works as CSDotnetRoot.
 global CSDotnetRoot := "C:\Program Files\Microsoft Visual Studio\18\Community\dotnet\net10.0\runtime"
 global CSRoslynDir := "C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\Roslyn"
 

@@ -36,10 +36,24 @@
 ; Credits:
 ;   CLR/.NET interop based on concepts and techniques from CLR.ahk by Lexikos:
 ;   Developed with AI assistance from Claude
-; If you later update Visual Studio and scripts stop starting, check the CSDotnetRoot/CSRoslynDir
-; and CsxDotnetRoot/CsxRoslynDir paths at the top of each library first.
+
 global CsxStreams := 3      ; Bitmask: 1=Console.Out 2=Console.Error
 global CsxOutput := ""      ; Console output of the last script
+
+; HARD-CODED PATHS: the two paths below point to the author's Visual Studio 2026 Community install.
+; Change them to match your machine. If you later update Visual Studio and scripts stop starting, check them first
+; (and CSDotnetRoot/CSRoslynDir in Csharp-in-AHK.ahk, if you use both libraries).
+;   CsxDotnetRoot must contain:
+;     host\fxr\<version>\hostfxr.dll
+;     shared\Microsoft.NETCore.App\<version>\           (.NET 8 or later)
+;     shared\Microsoft.WindowsDesktop.App\<version>\    (optional, needed for WinForms/WPF)
+;   CsxRoslynDir must contain:
+;     csc.exe                                    (compiles the embedded host once)
+;     Microsoft.CodeAnalysis.dll
+;     Microsoft.CodeAnalysis.CSharp.dll
+;     Microsoft.CodeAnalysis.Scripting.dll
+;     Microsoft.CodeAnalysis.CSharp.Scripting.dll
+;   A standalone .NET install (e.g. C:\Program Files\dotnet) also works as CsxDotnetRoot.
 global CsxDotnetRoot := "C:\Program Files\Microsoft Visual Studio\18\Community\dotnet\net10.0\runtime"
 global CsxRoslynDir := "C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\Roslyn"
 
