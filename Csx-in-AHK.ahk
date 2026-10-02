@@ -78,7 +78,7 @@ _CsxRun(Source, Path, Args) {
     Argv := Buffer(Max(Size, A_PtrSize)), Offset := Args.Length * A_PtrSize
     for i, Arg in Args {
         NumPut("ptr", Argv.Ptr + Offset, Argv, (i - 1) * A_PtrSize)
-        Offset += StrPut(String(Arg), Argv.Ptr + Offset, "UTF-16") * 2
+        Offset += StrPut(String(Arg), Argv.Ptr + Offset, "UTF-16")    ; StrPut returns bytes written
     }
     Status := DllCall(RunFn, "ptr", Path = "" ? StrPtr(Source) : 0, "ptr", Path = "" ? 0 : StrPtr(Path), "ptr", Argv, "int", Args.Length
         , "int", CsxStreams, "ptr*", &OutPtr := 0, "ptr*", &ResultPtr := 0, "int")
