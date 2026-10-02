@@ -29,6 +29,5 @@ Repo: https://github.com/burque505/Csharp-in-AHK (branch `main`, MIT license).
 - Put throwaway test scripts in the session scratchpad, not in the repo. The demo files use `MsgBox` and need a person to click through them.
 
 ## Conventions
-- `.ks` files are the owner's personal scripts. Never add them to this repo.
 - The owner may edit files between sessions. Treat the files on disk as current.
 - Commit or push only when asked.
