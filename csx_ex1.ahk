@@ -36,7 +36,7 @@ MsgBox RunCsx('
 MsgBox RunCsx('Console.WriteLine("Success"); Console.Error.WriteLine("Error"); throw new Exception("Boom");')
 
 ; Run a script file (which #loads a helper file); its console output is in CsxOutput
-MsgBox RunCsx("Example.csx", "AutoHotkey") "`n`nConsole output: " CsxOutput
+MsgBox RunCsx(A_ScriptDir "\Example.csx", "AutoHotkey") "`n`nConsole output: " CsxOutput
 
 ; Compilation errors are thrown as AHK errors (this example contains a deliberate mistake)
 try RunCsx('int x = "text";')
