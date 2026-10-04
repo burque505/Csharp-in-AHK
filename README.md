@@ -163,8 +163,20 @@ If one library has already started .NET, the other reuses the same runtime.
 | [`types_ex1.ahk`](types_ex1.ahk) | `RunCsx`: passing AHK integers, floats, strings, booleans, dates, arrays and Maps to C# and using the results in AHK |
 | [`cs_types_ex1.ahk`](cs_types_ex1.ahk) | The same with `RunCSharp` (top-level statements): results via `AHK.Return`, console output and the exit code, plus a local function and a `record` |
 | [`Example.csx`](Example.csx) / [`ExampleHelpers.csx`](ExampleHelpers.csx) | A script file that uses `#load` to pull in helper functions and classes |
+| [`pynet1.ahk`](pynet1.ahk) / [`pynet1.cs`](pynet1.cs) | Python inside AutoHotkey through [Python.NET](https://github.com/pythonnet/pythonnet): calling Python functions from C#, `import math`, `eval`, `print()` captured in the output |
+| [`pyplot1.ahk`](pyplot1.ahk) / [`pyplot1.cs`](pyplot1.cs) | WinForms and matplotlib in one window: five plots (3D surface, Lissajous, polar rose, Mandelbrot, complex phase field) with live sliders, colormaps, dark theme, animation and PNG export. The saved file's path is returned to AHK |
+| [`pynet.cs`](pynet.cs) | The `Pynet` helper class used by both Python examples (`#load "pynet.cs"`), adapted from a LibreAutomate script by its developer |
 
 The demos show their results with `MsgBox`.
+
+### Python examples
+
+The Python examples need some extra setup:
+
+- **Python 3.10 or later, 64-bit.** The path to its DLL is set at the top of `pynet.cs` (e.g. `...\Python312\python312.dll`). You can also set the `PYTHONNET_PYDLL` environment variable instead. `pyplot1` also needs matplotlib and numpy (`pip install matplotlib`).
+- **The `pythonnet` 3.1.0 package in the local NuGet cache**, because packages are not downloaded automatically. For example, add it once to any project with `dotnet add package pythonnet --version 3.1.0`.
+- The Python engine stays loaded for the life of the AHK process, so later scripts reuse it. It cannot be restarted after `PythonEngine.Shutdown()`, so both examples call that only from `OnExit`.
+- `Pynet` always uses the Python installation its DLL belongs to. An inherited `VIRTUAL_ENV` variable, for example from a VS Code terminal, is ignored. Set `PYTHONHOME` to override this.
 
 ---
 

@@ -9,6 +9,8 @@ Repo: https://github.com/burque505/Csharp-in-AHK (branch `main`, MIT license).
 - `cs_ex1.ahk`, `csx_ex1.ahk`: demos. `Example.csx` + `ExampleHelpers.csx` are used by `csx_ex1.ahk` (via `#load`).
 - `winforms_ex1.ahk`, `wpf_ex1.ahk`: minimal WinForms / WPF dialogs via `RunCsx` that return the user's input to AHK. Scripts run on AHK's STA thread, so UI uses modal `ShowDialog()`. Never use `Application.Run()`, because WPF allows only one `Application` per process.
 - `types_ex1.ahk` (`RunCsx`), `cs_types_ex1.ahk` (`RunCSharp`): passing AHK values of each type to C# through `args` (all arrive as strings) and converting the results back (`cs_types_ex1` uses `AHK.Return`, console output and `CSExitCode`). Arrays are spread with `Arr*`. Maps travel as `key=value` lines.
+- `pynet.cs`: `Pynet` helper class for Python.NET (adapted from a LibreAutomate script), pulled in with `#load "pynet.cs"`; the script itself needs `#:package pythonnet@3.1.0`. It starts the Python engine once per AHK process and never shuts it down: after `PythonEngine.Shutdown()` the engine cannot be initialized again in the same process (`NotImplementedException`), so the examples shut it down only in `OnExit`. It sets `PythonHome`/`ProgramName` from the DLL's folder, because an inherited `VIRTUAL_ENV` otherwise makes embedded Python use that venv's paths.
+- `pynet1.ahk` + `pynet1.cs`: basic Python.NET demo. `pyplot1.ahk` + `pyplot1.cs`: WinForms window with matplotlib plots rendered with the Agg backend to PNG in memory (no `plt.show()`), returns the saved PNG path via `AHK.Return`.
 - The two libraries are standalone and must stay includable together: keep their globals and functions distinct (`CS*` / `_CSharp*` vs `Csx*` / `_Csx*`, host classes `CSHost` vs `CsxHost`).
 
 ## How it works
@@ -20,10 +22,8 @@ Repo: https://github.com/burque505/Csharp-in-AHK (branch `main`, MIT license).
 - It sits inside an AHK `"( ... )"` continuation section. Quote marks are literal there, but no line may start with `)` (that ends the section), and backticks must not be used.
 - The host entry-point class (`CSHost` / `CsxHost`) must not reference Roslyn types in fields or method signatures. Roslyn is resolved by the `AssemblyLoadContext.Resolving` handler registered in `Init`, so Roslyn code belongs in the separate `ScriptCompiler` class.
 
-## Environment (owner's machine)
-- .NET runtime: `C:\Program Files\Microsoft Visual Studio\18\Community\dotnet\net10.0\runtime`
-- Roslyn: `C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\Roslyn`
-- AutoHotkey: `C:\Program Files\AutoHotkey\v2\AutoHotkey64.exe`
+## Environment
+- Machine-specific paths (.NET, Roslyn, AutoHotkey, Python) are in `CLAUDE.local.md`, which is not committed. Keep personal paths and details out of committed files.
 
 ## Testing
 - Run test scripts headless, writing results to stdout with `FileAppend(Text "`n", "*", "UTF-8")`:
