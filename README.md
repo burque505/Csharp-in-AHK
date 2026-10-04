@@ -11,6 +11,10 @@ Csharp-in-AHK hosts the .NET runtime (.NET 8 or later, tested on .NET 10) **insi
 MsgBox RunCsx('return "Hello from C# on .NET " + Environment.Version;')
 ```
 
+![WinForms window with live matplotlib plots, running inside AutoHotkey](images/pyplot.gif)
+
+*[`pyplot1.ahk`](pyplot1.ahk): a C# WinForms window that shows live matplotlib plots from Python, all inside the AutoHotkey process. See [Python examples](#python-examples).*
+
 ---
 
 ## Features
