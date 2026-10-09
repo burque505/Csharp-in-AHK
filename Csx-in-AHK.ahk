@@ -40,9 +40,14 @@
 global CsxStreams := 3      ; Bitmask: 1=Console.Out 2=Console.Error
 global CsxOutput := ""      ; Console output of the last script
 
-; HARD-CODED PATHS: the two paths below point to the author's Visual Studio 2026 Community install.
-; Change them to match your machine. If you later update Visual Studio and scripts stop starting, check them first
-; (and CSDotnetRoot/CSRoslynDir in Csharp-in-AHK.ahk, if you use both libraries).
+; PATHS: CsxDotnetRoot and CsxRoslynDir are found automatically the first time a script runs.
+; The first setting found wins (Csharp-in-AHK.ahk reads the same environment variables and .ini file):
+;   1. CsxDotnetRoot / CsxRoslynDir set by your script (before or after #Include, before the first RunCsx call).
+;   2. The environment variables CSHARP_IN_AHK_DOTNET / CSHARP_IN_AHK_ROSLYN.
+;   3. Csharp-in-AHK.ini next to this file, section [Paths], keys DotnetRoot / RoslynDir (see Csharp-in-AHK.example.ini).
+;   4. Auto-detection. .NET: DOTNET_ROOT, the registered x64 .NET install, %ProgramFiles%\dotnet, then the runtime
+;      bundled with Visual Studio. Roslyn: Visual Studio / Build Tools installs, newest first (found with vswhere.exe).
+;   A path set in steps 1-3 is never replaced by auto-detection: if it is wrong, you get an error.
 ;   CsxDotnetRoot must contain:
 ;     host\fxr\<version>\hostfxr.dll
 ;     shared\Microsoft.NETCore.App\<version>\           (.NET 8 or later)
@@ -54,8 +59,8 @@ global CsxOutput := ""      ; Console output of the last script
 ;     Microsoft.CodeAnalysis.Scripting.dll
 ;     Microsoft.CodeAnalysis.CSharp.Scripting.dll
 ;   A standalone .NET install (e.g. C:\Program Files\dotnet) also works as CsxDotnetRoot.
-global CsxDotnetRoot := "C:\Program Files\Microsoft Visual Studio\18\Community\dotnet\net10.0\runtime"
-global CsxRoslynDir := "C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\Roslyn"
+global CsxDotnetRoot := IsSet(CsxDotnetRoot) ? CsxDotnetRoot : ""
+global CsxRoslynDir := IsSet(CsxRoslynDir) ? CsxRoslynDir : ""
 
 RunCsx(Script, Args*) {
     if Script ~= "i)^[^\r\n]+\.csx?$" && (Attrib := FileExist(Script)) && !InStr(Attrib, "D")
@@ -100,13 +105,14 @@ _CsxHost() {
     static RunFn := 0
     if RunFn
         return RunFn
+    _CsxFindPaths(&DotnetFrom, &RoslynFrom)
     NetCore := _CsxLatestDir(CsxDotnetRoot "\shared\Microsoft.NETCore.App")
     Desktop := _CsxLatestDir(CsxDotnetRoot "\shared\Microsoft.WindowsDesktop.App")
     Fxr := _CsxLatestDir(CsxDotnetRoot "\host\fxr") "\hostfxr.dll"
     if !NetCore || !FileExist(Fxr)
-        throw Error(".NET runtime not found. Set CsxDotnetRoot to a folder containing host\fxr and shared\Microsoft.NETCore.App.", -1, CsxDotnetRoot)
+        throw Error(".NET 8 or later not found (" DotnetFrom "). CsxDotnetRoot must be a folder containing host\fxr and shared\Microsoft.NETCore.App.", -1, CsxDotnetRoot)
     if !FileExist(CsxRoslynDir "\csc.exe") || !FileExist(CsxRoslynDir "\Microsoft.CodeAnalysis.CSharp.Scripting.dll")
-        throw Error("Roslyn not found. Set CsxRoslynDir to a folder containing csc.exe and Microsoft.CodeAnalysis.CSharp.Scripting.dll.", -1, CsxRoslynDir)
+        throw Error("Roslyn not found (" RoslynFrom "). CsxRoslynDir must be a folder containing csc.exe and Microsoft.CodeAnalysis.CSharp.Scripting.dll.", -1, CsxRoslynDir)
 
     Source := "
     (
@@ -359,6 +365,80 @@ _CsxIsManaged(Path) {
     File.Pos := PE + 24, Magic := File.ReadUShort()
     File.Pos := PE + 24 + (Magic = 0x20B ? 112 : 96) + 14 * 8
     return File.ReadUInt() != 0
+}
+
+; Fills in CsxDotnetRoot and CsxRoslynDir if the script left them empty, and reports where each one came from.
+_CsxFindPaths(&DotnetFrom, &RoslynFrom) {
+    global CsxDotnetRoot, CsxRoslynDir
+    SplitPath(A_LineFile, , &Dir)
+    Ini := Dir "\Csharp-in-AHK.ini"
+    DotnetFrom := "set by the script", RoslynFrom := "set by the script"
+    if CsxDotnetRoot = "" && (CsxDotnetRoot := EnvGet("CSHARP_IN_AHK_DOTNET")) != ""
+        DotnetFrom := "from CSHARP_IN_AHK_DOTNET"
+    if CsxDotnetRoot = "" && (CsxDotnetRoot := IniRead(Ini, "Paths", "DotnetRoot", "")) != ""
+        DotnetFrom := "from " Ini
+    if CsxDotnetRoot = ""
+        CsxDotnetRoot := _CsxDetectDotnet(), DotnetFrom := "auto-detection"
+    if CsxRoslynDir = "" && (CsxRoslynDir := EnvGet("CSHARP_IN_AHK_ROSLYN")) != ""
+        RoslynFrom := "from CSHARP_IN_AHK_ROSLYN"
+    if CsxRoslynDir = "" && (CsxRoslynDir := IniRead(Ini, "Paths", "RoslynDir", "")) != ""
+        RoslynFrom := "from " Ini
+    if CsxRoslynDir = ""
+        CsxRoslynDir := _CsxDetectRoslyn(), RoslynFrom := "auto-detection"
+    CsxDotnetRoot := RTrim(CsxDotnetRoot, "\"), CsxRoslynDir := RTrim(CsxRoslynDir, "\")
+}
+
+_CsxDetectDotnet() {
+    for Dir in [EnvGet("DOTNET_ROOT"), RegRead("HKLM\SOFTWARE\WOW6432Node\dotnet\Setup\InstalledVersions\x64", "InstallLocation", ""), EnvGet("ProgramFiles") "\dotnet"] {
+        Dir := RTrim(Dir, "\")
+        if _CsxIsDotnetRoot(Dir)
+            return Dir
+    }
+    for Install in _CsxVsInstalls()
+        Loop Files Install "\dotnet\net*", "D"
+            if _CsxIsDotnetRoot(A_LoopFileFullPath "\runtime")
+                return A_LoopFileFullPath "\runtime"
+    return ""
+}
+
+_CsxIsDotnetRoot(Dir) {
+    if Dir = "" || !FileExist(Dir "\host\fxr")
+        return false
+    NetCore := _CsxLatestDir(Dir "\shared\Microsoft.NETCore.App")
+    SplitPath(NetCore, &Version)
+    return NetCore != "" && VerCompare(Version, "8.0.0") >= 0 && FileExist(_CsxLatestDir(Dir "\host\fxr") "\hostfxr.dll")
+}
+
+_CsxDetectRoslyn() {
+    for Install in _CsxVsInstalls()
+        if FileExist(Install "\MSBuild\Current\Bin\Roslyn\csc.exe") && FileExist(Install "\MSBuild\Current\Bin\Roslyn\Microsoft.CodeAnalysis.CSharp.Scripting.dll")
+            return Install "\MSBuild\Current\Bin\Roslyn"
+    return ""
+}
+
+; Visual Studio and Build Tools install folders, newest first.
+_CsxVsInstalls() {
+    static Installs := ""
+    if IsObject(Installs)
+        return Installs
+    Installs := []
+    VsWhere := EnvGet("ProgramFiles(x86)") "\Microsoft Visual Studio\Installer\vswhere.exe"
+    if FileExist(VsWhere) {
+        Out := A_Temp "\vswhere-" DllCall("GetCurrentProcessId") ".txt"
+        RunWait(A_ComSpec ' /c ""' VsWhere '" -all -prerelease -products * -sort -utf8 -property installationPath > "' Out '""', , "Hide")
+        if FileExist(Out) {
+            Loop Parse FileRead(Out, "UTF-8"), "`n", "`r"
+                if A_LoopField != ""
+                    Installs.Push(A_LoopField)
+            FileDelete(Out)
+        }
+    }
+    if !Installs.Length    ; No vswhere: look in the default install folders
+        for Root in [EnvGet("ProgramFiles"), EnvGet("ProgramFiles(x86)")]
+            Loop Files Root "\Microsoft Visual Studio\*", "D"
+                Loop Files A_LoopFileFullPath "\*", "D"
+                    Installs.Push(A_LoopFileFullPath)
+    return Installs
 }
 
 _CsxLatestDir(Parent) {

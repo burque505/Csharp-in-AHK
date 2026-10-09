@@ -38,19 +38,25 @@ MsgBox RunCsx('return "Hello from C# on .NET " + Environment.Version;')
 | .NET runtime | .NET 8 or later, including **Microsoft.WindowsDesktop.App** |
 | Roslyn compiler | The `Roslyn` folder containing `csc.exe` and `Microsoft.CodeAnalysis*.dll`, e.g. from Visual Studio or Build Tools |
 
-### ⚠️ Hard-coded paths
+### Paths
 
-Both libraries ship with **hard-coded paths** to the author's Visual Studio 2026 Community install. **You will probably need to change them**, at the top of each library:
+Both libraries find the .NET runtime and the Roslyn compiler **automatically** the first time a script runs. Usually there is nothing to configure. The first setting found wins:
 
-```ahk
-; Csharp-in-AHK.ahk
-global CSDotnetRoot := "C:\Program Files\Microsoft Visual Studio\18\Community\dotnet\net10.0\runtime"
-global CSRoslynDir  := "C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\Roslyn"
+1. **Your script:** `CSDotnetRoot` / `CSRoslynDir` (Csharp-in-AHK) or `CsxDotnetRoot` / `CsxRoslynDir` (Csx-in-AHK), set before or after the `#Include` and before the first call.
+2. **Environment variables:** `CSHARP_IN_AHK_DOTNET` and `CSHARP_IN_AHK_ROSLYN`.
+3. **`Csharp-in-AHK.ini`** next to the library. Copy [`Csharp-in-AHK.example.ini`](Csharp-in-AHK.example.ini) and edit it:
+   ```ini
+   [Paths]
+   DotnetRoot=C:\Program Files\dotnet
+   RoslynDir=C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\Roslyn
+   ```
+4. **Auto-detection.** For .NET it tries `DOTNET_ROOT`, the registered x64 .NET install, `%ProgramFiles%\dotnet`, then the runtime bundled with Visual Studio. For Roslyn it searches Visual Studio and Build Tools installs, newest first, using `vswhere.exe`.
 
-; Csx-in-AHK.ahk
-global CsxDotnetRoot := "C:\Program Files\Microsoft Visual Studio\18\Community\dotnet\net10.0\runtime"
-global CsxRoslynDir  := "C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\Roslyn"
-```
+Both libraries read the same environment variables and `.ini` file, so one setting covers both. A path you set in steps 1-3 is never replaced by auto-detection. If it is wrong, you get an error that says where the path came from.
+
+> Don't set `DOTNET_ROOT` just for these libraries. Other .NET programs use it to find their runtime. Use `CSHARP_IN_AHK_DOTNET` instead.
+>
+> Programs that are already running, such as VS Code or Explorer, don't see a new or changed environment variable until you restart them.
 
 The libraries look for these files in those folders:
 
@@ -62,15 +68,13 @@ The libraries look for these files in those folders:
 
 `csc.exe` is the only executable used. It runs once to compile the embedded host assembly. Scripts themselves are compiled in memory through the Roslyn DLLs. A standalone .NET install, such as `C:\Program Files\dotnet`, also works as the .NET root.
 
-If a required file is missing, the library throws an error that names the setting to fix.
-
-> If scripts stop starting after a Visual Studio update, check these paths first.
+If a required file is missing, the library throws an error that names the setting to fix and where its value came from.
 
 ## Installation
 
 1. Clone or download this repository.
 2. Copy `Csharp-in-AHK.ahk` and/or `Csx-in-AHK.ahk` next to your script, or into your AHK `Lib` folder.
-3. Adjust the runtime and Roslyn paths as shown above.
+3. If auto-detection doesn't find the right .NET or Roslyn, set the paths as shown above.
 4. `#Include` the library you want.
 
 ---

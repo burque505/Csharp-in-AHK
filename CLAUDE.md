@@ -14,6 +14,7 @@ Repo: https://github.com/burque505/Csharp-in-AHK (branch `main`, MIT license).
 - The two libraries are standalone and must stay includable together: keep their globals and functions distinct (`CS*` / `_CSharp*` vs `Csx*` / `_Csx*`, host classes `CSHost` vs `CsxHost`).
 
 ## How it works
+- `CSDotnetRoot`/`CSRoslynDir` and `CsxDotnetRoot`/`CsxRoslynDir` are resolved on first use (`_CSharpFindPaths` / `_CsxFindPaths`): a value set by the script, then the shared environment variables `CSHARP_IN_AHK_DOTNET`/`CSHARP_IN_AHK_ROSLYN`, then the shared `Csharp-in-AHK.ini` ([Paths] DotnetRoot/RoslynDir) next to the library, then auto-detection (DOTNET_ROOT, registry, %ProgramFiles%\dotnet, Visual Studio via vswhere). `Csharp-in-AHK.ini` is gitignored; `Csharp-in-AHK.example.ini` is the committed template.
 - AHK loads `hostfxr.dll` from `CSDotnetRoot` / `CsxDotnetRoot`, starts the runtime with a generated runtimeconfig (Microsoft.WindowsDesktop.App), and calls `[UnmanagedCallersOnly]` methods (`Init`, `Run`) via `DllCall`. If one library already started .NET, the other reuses that runtime.
 - The C# host source lives inside each .ahk file as an AHK continuation section. On first use it is compiled once with Roslyn `csc.exe` into `%TEMP%\CSharp-in-AHK\CSHost-<crc>.dll` (or `%TEMP%\Csx-in-AHK\CsxHost-<crc>.dll`). The CRC covers the host source, runtime version and compiler version, so editing the host source triggers a rebuild automatically.
 - Scripts are compiled in memory with the Roslyn DLLs from `CSRoslynDir` / `CsxRoslynDir` and cached per AHK process.
