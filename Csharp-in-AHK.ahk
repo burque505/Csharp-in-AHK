@@ -334,7 +334,7 @@ _CSharpHost() {
     if !FileExist(Config) {
         SplitPath(Desktop || NetCore, &Version)
         Framework := Desktop ? "Microsoft.WindowsDesktop.App" : "Microsoft.NETCore.App"
-        FileOpen(Config, "w", "UTF-8-RAW").Write('{"runtimeOptions":{"framework":{"name":"' Framework '","version":"' Version '"}}}')
+        F := FileOpen(Config, "w", "UTF-8-RAW"), F.Write('{"runtimeOptions":{"framework":{"name":"' Framework '","version":"' Version '"}}}'), F.Close()
     }
 
     ; Start the runtime with hostfxr (https://learn.microsoft.com/dotnet/core/tutorials/netcore-hosting)
@@ -366,13 +366,13 @@ _CSharpBuildHost(Source, Cache, Name, NetCore) {
     global CSRoslynDir
     DirCreate(Cache)
     Base := Cache "\" Name
-    FileOpen(Base ".cs", "w", "UTF-8").Write(Source)
+    F := FileOpen(Base ".cs", "w", "UTF-8"), F.Write(Source), F.Close()
     Rsp := '-nologo -noconfig -nostdlib -target:library -unsafe -optimize -langversion:latest -out:"' Base '.dll"`n'
     Loop Files NetCore "\*.dll"
         if _CSharpIsManaged(A_LoopFileFullPath)
             Rsp .= '-r:"' A_LoopFileFullPath '"`n'
     Rsp .= '-r:"' CSRoslynDir '\Microsoft.CodeAnalysis.dll"`n-r:"' CSRoslynDir '\Microsoft.CodeAnalysis.CSharp.dll"`n"' Base '.cs"'
-    FileOpen(Base ".rsp", "w", "UTF-8").Write(Rsp)
+    F := FileOpen(Base ".rsp", "w", "UTF-8"), F.Write(Rsp), F.Close()
     if RunWait(A_ComSpec ' /c ""' CSRoslynDir '\csc.exe" @"' Base '.rsp" > "' Base '.log" 2>&1"', , "Hide") || !FileExist(Base ".dll") {
         try FileDelete(Base ".dll")
         throw Error("Failed to compile the C# host", -2, FileExist(Base ".log") ? FileRead(Base ".log") : "")

@@ -308,7 +308,7 @@ _CsxHost() {
     if !FileExist(Config) {
         SplitPath(Desktop || NetCore, &Version)
         Framework := Desktop ? "Microsoft.WindowsDesktop.App" : "Microsoft.NETCore.App"
-        FileOpen(Config, "w", "UTF-8-RAW").Write('{"runtimeOptions":{"framework":{"name":"' Framework '","version":"' Version '"}}}')
+        F := FileOpen(Config, "w", "UTF-8-RAW"), F.Write('{"runtimeOptions":{"framework":{"name":"' Framework '","version":"' Version '"}}}'), F.Close()
     }
 
     ; Start the runtime with hostfxr (https://learn.microsoft.com/dotnet/core/tutorials/netcore-hosting).
@@ -341,7 +341,7 @@ _CsxBuildHost(Source, Cache, Name, NetCore) {
     global CsxRoslynDir
     DirCreate(Cache)
     Base := Cache "\" Name
-    FileOpen(Base ".cs", "w", "UTF-8").Write(Source)
+    F := FileOpen(Base ".cs", "w", "UTF-8"), F.Write(Source), F.Close()
     Rsp := '-nologo -noconfig -nostdlib -target:library -unsafe -optimize -langversion:latest -out:"' Base '.dll"`n'
     Loop Files NetCore "\*.dll"
         if _CsxIsManaged(A_LoopFileFullPath)
@@ -349,7 +349,7 @@ _CsxBuildHost(Source, Cache, Name, NetCore) {
     for Ref in ["Microsoft.CodeAnalysis", "Microsoft.CodeAnalysis.CSharp", "Microsoft.CodeAnalysis.Scripting", "Microsoft.CodeAnalysis.CSharp.Scripting"]
         Rsp .= '-r:"' CsxRoslynDir '\' Ref '.dll"`n'
     Rsp .= '"' Base '.cs"'
-    FileOpen(Base ".rsp", "w", "UTF-8").Write(Rsp)
+    F := FileOpen(Base ".rsp", "w", "UTF-8"), F.Write(Rsp), F.Close()
     if RunWait(A_ComSpec ' /c ""' CsxRoslynDir '\csc.exe" @"' Base '.rsp" > "' Base '.log" 2>&1"', , "Hide") || !FileExist(Base ".dll") {
         try FileDelete(Base ".dll")
         throw Error("Failed to compile the C# script host", -2, FileExist(Base ".log") ? FileRead(Base ".log") : "")

@@ -6,6 +6,7 @@ Repo: https://github.com/burque505/Csharp-in-AHK (branch `main`, MIT license).
 ## Files
 - `Csharp-in-AHK.ahk`: `RunCSharp` / `RunCSharpFile`. Regular C# files with top-level statements (like `dotnet run app.cs`). The int return value goes to `CSExitCode`. `AHK.Return(value)` sends any value back. Console output goes to `CSOutput`.
 - `Csx-in-AHK.ahk`: `RunCsx` / `RunCsxFile`. C# script (.csx) syntax using the Roslyn scripting API. `return <any value>` or a final expression is returned to AHK. Console output goes to `CsxOutput`.
+- `Csharp-in-AHK-Paths.ahk`: GUI for the path settings (user environment variables in HKCU\Environment, `Csharp-in-AHK.ini`, auto-detection). It must sit next to both libraries: it includes `Csx-in-AHK.ahk` with `#Include *i` only for its detection functions (looked up by name, so a missing library gives one message instead of load errors) and runs Test in a separate AHK process, so .NET is never started in the GUI process.
 - `cs_ex1.ahk`, `csx_ex1.ahk`: demos. `Example.csx` + `ExampleHelpers.csx` are used by `csx_ex1.ahk` (via `#load`).
 - `winforms_ex1.ahk`, `wpf_ex1.ahk`: minimal WinForms / WPF dialogs via `RunCsx` that return the user's input to AHK. Scripts run on AHK's STA thread, so UI uses modal `ShowDialog()`. Never use `Application.Run()`, because WPF allows only one `Application` per process.
 - `types_ex1.ahk` (`RunCsx`), `cs_types_ex1.ahk` (`RunCSharp`): passing AHK values of each type to C# through `args` (all arrive as strings) and converting the results back (`cs_types_ex1` uses `AHK.Return`, console output and `CSExitCode`). Arrays are spread with `Arr*`. Maps travel as `key=value` lines.
@@ -34,3 +35,4 @@ Repo: https://github.com/burque505/Csharp-in-AHK (branch `main`, MIT license).
 ## Conventions
 - The owner may edit files between sessions. Treat the files on disk as current.
 - Commit or push only when asked.
+- Keep the .ahk files compatible with Keysharp as well as AutoHotkey. Keysharp closes a file only when it is garbage-collected, so close every written file explicitly (`F := FileOpen(...), F.Write(...), F.Close()`) before anything else reads it. Keysharp can also run GUI events (such as an Edit's Change, raised when code sets `.Value`) while other code is still running, so event handlers must not assume that setup has finished.

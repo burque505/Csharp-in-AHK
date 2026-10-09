@@ -52,7 +52,7 @@ Both libraries find the .NET runtime and the Roslyn compiler **automatically** t
    ```
 4. **Auto-detection.** For .NET it tries `DOTNET_ROOT`, the registered x64 .NET install, `%ProgramFiles%\dotnet`, then the runtime bundled with Visual Studio. For Roslyn it searches Visual Studio and Build Tools installs, newest first, using `vswhere.exe`.
 
-Both libraries read the same environment variables and `.ini` file, so one setting covers both. A path you set in steps 1-3 is never replaced by auto-detection. If it is wrong, you get an error that says where the path came from.
+Both libraries read the same environment variables and `.ini` file, so one setting covers both. [`Csharp-in-AHK-Paths.ahk`](Csharp-in-AHK-Paths.ahk) is a small GUI that shows the detected paths and the path each library will use. It shows the user and system-wide environment variables, can create the missing ones with the paths in use (no registry editing needed), edits the user variables and `Csharp-in-AHK.ini`, and tests the result. It must be in the same folder as both libraries, because it edits the `Csharp-in-AHK.ini` they read. If a library is missing, it says which one and exits. A path you set in steps 1-3 is never replaced by auto-detection. If it is wrong, you get an error that says where the path came from.
 
 > Don't set `DOTNET_ROOT` just for these libraries. Other .NET programs use it to find their runtime. Use `CSHARP_IN_AHK_DOTNET` instead.
 >
@@ -164,6 +164,7 @@ If one library has already started .NET, the other reuses the same runtime.
 
 | File | Description |
 |---|---|
+| [`Csharp-in-AHK-Paths.ahk`](Csharp-in-AHK-Paths.ahk) | GUI for the path settings: environment variables, `Csharp-in-AHK.ini`, auto-detection and a test run of both libraries |
 | [`cs_ex1.ahk`](cs_ex1.ahk) | Demos for `RunCSharp`: output, args, exit codes, exceptions, `AHK.Return` |
 | [`csx_ex1.ahk`](csx_ex1.ahk) | Demos for `RunCsx`: return values, collections, records, `await`, files, compile errors |
 | [`winforms_ex1.ahk`](winforms_ex1.ahk) | Minimal WinForms dialog that returns the user's input to AHK |
