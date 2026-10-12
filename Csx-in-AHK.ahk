@@ -22,8 +22,8 @@
 ;     System.Threading, System.Threading.Tasks. All .NET and Windows Desktop (WinForms/WPF) assemblies are referenced.
 ;   - `args` holds the extra parameters passed to RunCsx.
 ;   - #r "path\to\Some.dll"    references an assembly
-;   - #r "nuget: Name, 1.2.3"  or  #:package Name@1.2.3   references a NuGet package from the local NuGet cache
-;                              (dependencies are not resolved)
+;   - #r "nuget: Name, 1.2.3"  or  #:package Name@1.2.3   references a NuGet package and its dependencies.
+;                              Missing packages are downloaded (see NUGET below).
 ;   - #load "Other.csx"        runs another script file first (its functions and classes become available)
 ;   - Relative paths are resolved against the script's folder (or the working directory for inline scripts).
 ;   - Compiled scripts are cached per AHK process; a script is recompiled when it or a #load-ed file changes.
@@ -33,8 +33,18 @@
 ;   Bitmask: 1=Console.Out 2=Console.Error (including unhandled exceptions)
 ;   Compilation errors are thrown as AHK errors.
 ;
+; NUGET: package references are restored like `dotnet run app.cs` does, with the NuGet client libraries
+;   (NuGet.Commands), which are downloaded once from nuget.org into %LOCALAPPDATA%\Csharp-in-AHK\nuget\client.
+;   - Packages and their dependencies go to the global NuGet folder (~\.nuget\packages); nuget.config sources and
+;     credentials are used. Native DLLs (runtimes\win-x64\native) are found too.
+;   - Versions follow NuGet: 1.2.3 means 1.2.3 or the lowest version above it, * is the newest stable version,
+;     1.* the newest 1.x, [1.0,2.0) a range. Without a version, * is used.
+;   - The resolved files are cached in %LOCALAPPDATA%\Csharp-in-AHK\nuget\restore, so later runs do not restore again.
+;     Versions with * are checked for updates once a day; if that fails (e.g. offline), the last result is used.
+;
 ; Credits:
 ;   CLR/.NET interop based on concepts and techniques from CLR.ahk by Lexikos:
+;   NuGet support modeled on the NuGet package provider of Keysharp (no code taken).
 ;   Developed with AI assistance from Claude
 
 global CsxStreams := 3      ; Bitmask: 1=Console.Out 2=Console.Error
@@ -121,13 +131,20 @@ _CsxHost() {
     using System.Collections.Generic;
     using System.Globalization;
     using System.IO;
+    using System.IO.Compression;
     using System.Linq;
+    using System.Net.Http;
+    using System.Reflection;
     using System.Runtime.InteropServices;
     using System.Runtime.Loader;
+    using System.Security.Cryptography;
     using System.Text;
     using System.Text.RegularExpressions;
+    using System.Threading;
     using System.Threading.Tasks;
+    using System.Xml.Linq;
     using Microsoft.CodeAnalysis;
+    using Microsoft.CodeAnalysis.CSharp;
     using Microsoft.CodeAnalysis.CSharp.Scripting;
     using Microsoft.CodeAnalysis.Scripting;
 
@@ -141,6 +158,7 @@ _CsxHost() {
     public static unsafe class CsxHost {
         internal static string RoslynDir = "";
         internal static readonly Dictionary<string, string> RefPaths = new(StringComparer.OrdinalIgnoreCase);
+        internal static readonly Dictionary<string, string> NativePaths = new(StringComparer.OrdinalIgnoreCase);
 
         [UnmanagedCallersOnly]
         public static int Init(char* roslynDir) {
@@ -149,6 +167,10 @@ _CsxHost() {
                 if (!RefPaths.TryGetValue(name.Name, out var path)) path = Path.Combine(RoslynDir, name.Name + ".dll");
                 return File.Exists(path) ? context.LoadFromAssemblyPath(path) : null;
             };
+            // Native DLLs of NuGet packages
+            AssemblyLoadContext.Default.ResolvingUnmanagedDll += (assembly, name) =>
+                NativePaths.TryGetValue(name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ? name[..^4] : name, out var path)
+                    ? NativeLibrary.Load(path) : IntPtr.Zero;
             return 0;
         }
 
@@ -219,12 +241,13 @@ _CsxHost() {
             }
             source ??= "";
             string dir = file != null ? Path.GetDirectoryName(file) : Environment.CurrentDirectory;
-            var refs = new List<string>();
+            var packages = new List<string>();
             source = DirectiveRx.Replace(source, m => {
-                if (m.Groups[1].Success) refs.AddRange(NuGet(m.Groups[1].Value, ','));
-                else if (m.Groups[2].Value.Equals("package", StringComparison.OrdinalIgnoreCase)) refs.AddRange(NuGet(m.Groups[3].Value, '@'));
+                if (m.Groups[1].Success) packages.Add(Packages.Parse(m.Groups[1].Value, ','));
+                else if (m.Groups[2].Value.Equals("package", StringComparison.OrdinalIgnoreCase)) packages.Add(Packages.Parse(m.Groups[3].Value, '@'));
                 return "";
             });
+            var refs = packages.Count > 0 ? Packages.Resolve(packages) : new List<string>();
 
             string key = dir + "\0" + file + "\0" + string.Join("\0", refs) + "\0" + source;
             if (cache.TryGetValue(key, out var cached) && cached.Files.All(f => File.Exists(f.Path) && File.GetLastWriteTimeUtc(f.Path) == f.Time))
@@ -260,32 +283,135 @@ _CsxHost() {
             cache[key] = entry;
             return entry.Run;
         }
+    }
 
-        // Resolves a package from the local NuGet cache (packages must have been restored before).
-        static IEnumerable<string> NuGet(string spec, char separator) {
+    // NuGet package references, restored with the NuGet client libraries (downloaded once from nuget.org).
+    // The client and the restore code run in their own AssemblyLoadContext, so that their dependencies
+    // (e.g. Newtonsoft.Json) cannot clash with the packages a script uses.
+    static class Packages {
+        const string ClientVersion = "7.9.0";
+        const string Feed = "https://api.nuget.org/v3-flatcontainer/";
+        static readonly string Root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Csharp-in-AHK", "nuget");
+        static readonly Dictionary<string, List<string>> resolved = new();
+        static HashSet<string> framework;
+        static MethodInfo restore;
+
+        // "Name@1.2.3" or "Name, 1.2.3" -> "Name|1.2.3"
+        public static string Parse(string spec, char separator) {
             int i = spec.IndexOf(separator);
             string name = (i < 0 ? spec : spec.Substring(0, i)).Trim(), version = i < 0 ? "" : spec.Substring(i + 1).Trim();
-            string root = Environment.GetEnvironmentVariable("NUGET_PACKAGES")
-                ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".nuget", "packages");
-            string dir = Path.Combine(root, name.ToLowerInvariant());
-            if (version is "" or "*")
-                version = !Directory.Exists(dir) ? null : Directory.GetDirectories(dir).Select(Path.GetFileName)
-                    .OrderBy(v => v.Contains('-'))
-                    .ThenByDescending(v => Version.TryParse(v.Split('-')[0], out var parsed) ? parsed : new Version())
-                    .FirstOrDefault();
-            string lib = Path.Combine(dir, version?.ToLowerInvariant() ?? "", "lib");
-            if (version == null || !Directory.Exists(lib))
-                throw new Exception($"NuGet package {name} {version} was not found in {root}. Restore it once (e.g. with dotnet restore) to add it to the local cache.");
-            string best = Directory.GetDirectories(lib).Where(d => FrameworkScore(Path.GetFileName(d)) > 0)
-                .OrderByDescending(d => FrameworkScore(Path.GetFileName(d))).FirstOrDefault()
-                ?? throw new Exception($"NuGet package {name} {version} has no library for .NET {Environment.Version.Major}.");
-            var dlls = Directory.GetFiles(best, "*.dll");
-            foreach (var dll in dlls) CsxHost.RefPaths[Path.GetFileNameWithoutExtension(dll)] = dll;
-            return dlls;
+            return name + "|" + (version == "" ? "*" : version);
+        }
+
+        // Restores the packages with their dependencies and returns the assemblies to compile against.
+        public static List<string> Resolve(List<string> packages) {
+            string tfm = "net" + Environment.Version.Major + ".0-windows7.0";    // what the SDK uses for -windows
+            var list = packages.Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(p => p, StringComparer.OrdinalIgnoreCase).ToArray();
+            string key = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
+                string.Join("\n", list) + "\n" + tfm + "\n" + ClientVersion + "\n" + RestorerSource))).Substring(0, 16);
+            if (resolved.TryGetValue(key, out var refs)) return refs;
+
+            string dir = Path.Combine(Root, "restore", key), file = Path.Combine(dir, "assets.txt");
+            string[] lines;
+            using (var mutex = new Mutex(false, @"Local\Csharp-in-AHK-NuGet")) {
+                try { mutex.WaitOne(); } catch (AbandonedMutexException) { }
+                try {
+                    lines = Cached(file, list.Any(p => p.Contains('*')));
+                    if (lines == null) {
+                        try {
+                            restore ??= LoadRestorer();
+                            lines = (string[])restore.Invoke(null, BindingFlags.DoNotWrapExceptions, null, new object[] { dir, tfm, list }, null);
+                            File.WriteAllLines(file + ".tmp", lines);
+                            File.Move(file + ".tmp", file, true);
+                        } catch (Exception) when ((lines = Cached(file, false)) != null) { }    // e.g. offline: use the last result
+                    }
+                } finally {
+                    mutex.ReleaseMutex();
+                }
+            }
+
+            framework ??= new(((string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")).Split(Path.PathSeparator)
+                .Select(Path.GetFileNameWithoutExtension), StringComparer.OrdinalIgnoreCase);
+            refs = new List<string>();
+            foreach (var line in lines) {
+                int i = line.IndexOf('|');
+                string kind = line.Substring(0, i), path = line.Substring(i + 1), name = Path.GetFileNameWithoutExtension(path);
+                if (kind == "native") CsxHost.NativePaths[name] = path;
+                else if (framework.Contains(name)) continue;    // the runtime's own version is used
+                else if (kind == "compile") refs.Add(path);
+                else if (kind == "runtime") CsxHost.RefPaths[name] = path;
+            }
+            return resolved[key] = refs;
+        }
+
+        // The last restore result, unless it is missing files or (for versions with *) older than a day.
+        static string[] Cached(string file, bool floating) {
+            if (!File.Exists(file) || floating && File.GetLastWriteTimeUtc(file) < DateTime.UtcNow.AddDays(-1)) return null;
+            var lines = File.ReadAllLines(file);
+            return lines.All(line => File.Exists(line.Substring(line.IndexOf('|') + 1))) ? lines : null;
+        }
+
+        static MethodInfo LoadRestorer() {
+            string client = Client();
+            var context = new ClientLoadContext(client);
+            var refs = ((string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")).Split(Path.PathSeparator)
+                .Concat(Directory.GetFiles(client, "*.dll")).Select(path => MetadataReference.CreateFromFile(path));
+            var compilation = CSharpCompilation.Create("CsxNuGetRestorer",
+                new[] { CSharpSyntaxTree.ParseText(RestorerSource, new CSharpParseOptions(LanguageVersion.Latest)) }, refs,
+                new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, optimizationLevel: OptimizationLevel.Release));
+            using var pe = new MemoryStream();
+            var result = compilation.Emit(pe);
+            if (!result.Success)
+                throw new Exception("Failed to compile the NuGet restorer:\r\n" + string.Join("\r\n",
+                    result.Diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error)));
+            pe.Position = 0;
+            return context.LoadFromStream(pe).GetType("Restorer").GetMethod("Restore");
+        }
+
+        // Downloads NuGet.Commands and its dependencies (lib folder for this .NET version) once.
+        static string Client() {
+            string dir = Path.Combine(Root, "client", ClientVersion);
+            if (Directory.Exists(dir)) return dir;
+            string temp = dir + ".tmp";
+            if (Directory.Exists(temp)) Directory.Delete(temp, true);
+            Directory.CreateDirectory(temp);
+            var tpa = new HashSet<string>(((string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")).Split(Path.PathSeparator)
+                .Select(Path.GetFileNameWithoutExtension), StringComparer.OrdinalIgnoreCase);
+            var versions = new Dictionary<string, Version>(StringComparer.OrdinalIgnoreCase);
+            var pending = new Queue<(string Id, string Version)>();
+            pending.Enqueue(("NuGet.Commands", ClientVersion));
+            using var http = new HttpClient();
+            try {
+                while (pending.Count > 0) {
+                    var (id, text) = pending.Dequeue();
+                    var version = Version.Parse(text.Trim('[', '(', ' ').Split(',')[0]);
+                    if (tpa.Contains(id) || versions.TryGetValue(id, out var have) && have >= version) continue;
+                    versions[id] = version;
+                    string lower = id.ToLowerInvariant(), v = version.Revision > 0 ? version.ToString() : $"{version.Major}.{version.Minor}.{Math.Max(version.Build, 0)}";
+                    using var zip = new ZipArchive(new MemoryStream(http.GetByteArrayAsync($"{Feed}{lower}/{v}/{lower}.{v}.nupkg").GetAwaiter().GetResult()));
+                    using (var stream = zip.Entries.First(e => e.FullName.EndsWith(".nuspec") && !e.FullName.Contains('/')).Open()) {
+                        var nuspec = XDocument.Load(stream).Descendants().Where(e => e.Name.LocalName == "dependencies").FirstOrDefault();
+                        var group = nuspec?.Elements().Where(e => e.Name.LocalName == "group")
+                            .OrderByDescending(g => FrameworkScore((string)g.Attribute("targetFramework"))).FirstOrDefault(g => FrameworkScore((string)g.Attribute("targetFramework")) > 0);
+                        foreach (var dependency in (group ?? nuspec)?.Elements().Where(e => e.Name.LocalName == "dependency") ?? Enumerable.Empty<XElement>())
+                            pending.Enqueue(((string)dependency.Attribute("id"), (string)dependency.Attribute("version")));
+                    }
+                    var lib = zip.Entries.Where(e => e.FullName.StartsWith("lib/") && e.FullName.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
+                        .GroupBy(e => e.FullName.Split('/')[1]).Where(g => FrameworkScore(g.Key) > 0)
+                        .OrderByDescending(g => FrameworkScore(g.Key)).FirstOrDefault();
+                    foreach (var entry in lib ?? Enumerable.Empty<ZipArchiveEntry>())
+                        if (!tpa.Contains(Path.GetFileNameWithoutExtension(entry.Name)))
+                            entry.ExtractToFile(Path.Combine(temp, entry.Name), true);
+                }
+            } catch (Exception ex) {
+                throw new Exception("Failed to download the NuGet client from nuget.org: " + ex.Message, ex);
+            }
+            Directory.Move(temp, dir);
+            return dir;
         }
 
         static int FrameworkScore(string tfm) {
-            var m = Regex.Match(tfm, @"^(netstandard|netcoreapp|net)(\d+)\.(\d+)");
+            var m = Regex.Match((tfm ?? "").ToLowerInvariant().TrimStart('.'), @"^(netstandard|netcoreapp|net)(\d+)\.(\d+)");
             if (!m.Success) return 0;
             int major = int.Parse(m.Groups[2].Value), minor = int.Parse(m.Groups[3].Value);
             return m.Groups[1].Value switch {
@@ -294,6 +420,129 @@ _CsxHost() {
                 "netstandard" => 100 + major * 10 + minor,
                 _ => 0
             };
+        }
+
+        // Compiled in memory against the NuGet client. Restore(dir, tfm, packages) returns "compile|path",
+        // "runtime|path" and "native|path" lines for all packages in the graph.
+        const string RestorerSource = """"
+        using System;
+        using System.Collections.Generic;
+        using System.Collections.Immutable;
+        using System.IO;
+        using System.Linq;
+        using System.Threading.Tasks;
+        using NuGet.Commands;
+        using NuGet.Common;
+        using NuGet.Configuration;
+        using NuGet.Credentials;
+        using NuGet.Frameworks;
+        using NuGet.LibraryModel;
+        using NuGet.ProjectModel;
+        using NuGet.Protocol;
+        using NuGet.Protocol.Core.Types;
+        using NuGet.RuntimeModel;
+        using NuGet.Versioning;
+
+        public static class Restorer {
+            const string Rid = "win-x64";
+
+            // packages: "Id|VersionRange"
+            public static string[] Restore(string dir, string tfm, string[] packages) =>
+                Task.Run(() => RestoreAsync(dir, tfm, packages)).GetAwaiter().GetResult();
+
+            static async Task<string[]> RestoreAsync(string dir, string tfm, string[] packages) {
+                Directory.CreateDirectory(dir);
+                var log = new ErrorLog();
+                var settings = Settings.LoadDefaultSettings(dir);
+                DefaultCredentialServiceUtility.SetupDefaultCredentialService(log, nonInteractive: true);
+                var framework = NuGetFramework.Parse(tfm);
+                string project = Path.Combine(dir, "packages.csproj"), graphFile = Path.Combine(dir, "runtime.json");
+                // RID fallbacks, so that runtimes/win/... assets are found for win-x64
+                JsonRuntimeFormat.WriteRuntimeGraph(graphFile, new RuntimeGraph(new[] {
+                    new RuntimeDescription("base"),
+                    new RuntimeDescription("any", new[] { "base" }),
+                    new RuntimeDescription("win", new[] { "any" }),
+                    new RuntimeDescription(Rid, new[] { "win" }) }));
+
+                var dependencies = packages.Select(p => p.Split('|')).Select(p => new LibraryDependency {
+                    LibraryRange = new LibraryRange(p[0], VersionRange.Parse(p[1]), LibraryDependencyTarget.Package)
+                }).ToImmutableArray();
+                var sourceProvider = new PackageSourceProvider(settings);
+                var spec = new PackageSpec(new[] { new TargetFrameworkInformation {
+                    FrameworkName = framework, TargetAlias = tfm, Dependencies = dependencies, RuntimeIdentifierGraphPath = graphFile } }) {
+                    Name = "packages",
+                    FilePath = project,
+                    RuntimeGraph = new RuntimeGraph(new[] { new RuntimeDescription(Rid) }),
+                    RestoreMetadata = new ProjectRestoreMetadata {
+                        ProjectStyle = ProjectStyle.PackageReference,
+                        ProjectPath = project,
+                        ProjectName = "packages",
+                        ProjectUniqueName = project,
+                        OutputPath = dir,
+                        PackagesPath = SettingsUtility.GetGlobalPackagesFolder(settings),
+                        Sources = sourceProvider.LoadPackageSources().Where(s => s.IsEnabled).ToList(),
+                        FallbackFolders = SettingsUtility.GetFallbackPackageFolders(settings).ToList(),
+                        ConfigFilePaths = settings.GetConfigFilePaths().ToList(),
+                        OriginalTargetFrameworks = new List<string> { tfm },
+                        TargetFrameworks = new List<ProjectRestoreMetadataFrameworkInfo> { new(framework) { TargetAlias = tfm } }
+                    }
+                };
+                var graph = new DependencyGraphSpec();
+                graph.AddProject(spec);
+                graph.AddRestore(project);
+
+                using var cache = new SourceCacheContext();
+                var args = new RestoreArgs {
+                    CacheContext = cache,
+                    CachingSourceProvider = new CachingSourceProvider(sourceProvider),
+                    Log = log,
+                    AllowNoOp = false
+                };
+                args.PreLoadedRequestProviders.Add(new DependencyGraphSpecRequestProvider(new RestoreCommandProvidersCache(), graph, settings));
+                var requests = await RestoreRunner.GetRequests(args);
+                var result = (await RestoreRunner.RunWithoutCommit(requests, args)).Single().Result;
+                if (!result.Success)
+                    throw new Exception("NuGet restore failed:\r\n" + string.Join("\r\n", log.Errors.Distinct()));
+
+                var lockFile = result.LockFile;
+                var target = lockFile.Targets.First(t => t.RuntimeIdentifier == Rid);
+                var folders = lockFile.PackageFolders.Select(f => f.Path).Append(spec.RestoreMetadata.PackagesPath).ToList();
+                var lines = new List<string>();
+                foreach (var library in target.Libraries.Where(l => l.Type == "package")) {
+                    var package = lockFile.GetLibrary(library.Name, library.Version);
+                    string root = folders.Select(f => Path.Combine(f, package.Path)).First(Directory.Exists);
+                    void Add(string kind, IEnumerable<LockFileItem> items) {
+                        foreach (var item in items)
+                            if (!item.Path.EndsWith("_._")) lines.Add(kind + "|" + Path.GetFullPath(Path.Combine(root, item.Path)));
+                    }
+                    Add("compile", library.CompileTimeAssemblies);
+                    Add("runtime", library.RuntimeAssemblies);
+                    Add("native", library.NativeLibraries);
+                }
+                return lines.ToArray();
+            }
+
+            class ErrorLog : LoggerBase {
+                public readonly List<string> Errors = new();
+                public override void Log(ILogMessage message) {
+                    if (message.Level >= LogLevel.Error) lock (Errors) Errors.Add(message.FormatWithCode());
+                }
+                public override Task LogAsync(ILogMessage message) {
+                    Log(message);
+                    return Task.CompletedTask;
+                }
+            }
+        }
+        """";
+    }
+
+    // Loads the NuGet client assemblies from their own folder; framework assemblies come from the runtime.
+    class ClientLoadContext : AssemblyLoadContext {
+        readonly string dir;
+        public ClientLoadContext(string dir) : base("Csharp-in-AHK NuGet client") { this.dir = dir; }
+        protected override Assembly Load(AssemblyName name) {
+            string path = Path.Combine(dir, name.Name + ".dll");
+            return File.Exists(path) ? LoadFromAssemblyPath(path) : null;
         }
     }
     )"

@@ -26,7 +26,7 @@ MsgBox RunCsx('return "Hello from C# on .NET " + Environment.Version;')
 - **Values come back to AHK** as text that AHK can use directly: `bool` becomes `1`/`0`, numbers and dates use the invariant culture, and collections become one item per line.
 - **Console output is captured.** `Console.Out` and `Console.Error` are collected and returned or exposed in a global variable.
 - **Compilation errors are thrown as AHK errors**, with the compiler diagnostics in the message.
-- **Directives:** `#r "Some.dll"`, `#r "nuget: Name, 1.2.3"`, `#:package Name@1.2.3` (from the local NuGet cache), and `#load "Other.cs"`.
+- **Directives:** `#r "Some.dll"`, `#r "nuget: Name, 1.2.3"`, `#:package Name@1.2.3` (NuGet packages, downloaded when missing), and `#load "Other.cs"`.
 - **Caching.** The host assembly is compiled once to `%TEMP%`, and compiled scripts are cached for the life of the AHK process.
 - **Both libraries can be included together.** They share a single .NET runtime and use separate globals and functions.
 
@@ -152,7 +152,7 @@ A script file is recompiled automatically when it, or any file it `#load`s, chan
 
 - **Implicit usings:** `System`, `System.Collections.Generic`, `System.IO`, `System.Linq`, `System.Net.Http`, `System.Threading`, `System.Threading.Tasks` (plus `System.Text` in Csx). All .NET and Windows Desktop assemblies are referenced.
 - **Relative paths** in directives are resolved against the script's folder, or the working directory for inline scripts.
-- **NuGet packages** are taken from the local NuGet cache. Their dependencies are not resolved automatically.
+- **NuGet packages** are restored the way `dotnet run app.cs` restores them, including dependencies and native DLLs. See [NuGet packages](#nuget-packages).
 - **`Environment.Exit()`** inside a script also terminates AutoHotkey, because both run in the same process.
 
 ## How it works
@@ -163,6 +163,21 @@ A script file is recompiled automatically when it, or any file it `#load`s, chan
 4. User scripts are compiled in memory with the Roslyn assemblies and executed. Results and captured output are marshalled back as UTF-16 strings.
 
 If one library has already started .NET, the other reuses the same runtime.
+
+## NuGet packages
+
+`#:package Name@version` and `#r "nuget: Name, version"` work in both libraries:
+
+```csharp
+#:package Microsoft.Data.Sqlite@8.0.0
+using Microsoft.Data.Sqlite;
+```
+
+- The first package reference downloads the NuGet client libraries (NuGet.Commands 7.9.0 and its dependencies, about 4 MB) from nuget.org into `%LOCALAPPDATA%\Csharp-in-AHK\nuget\client`. No .NET SDK is needed.
+- Packages are restored with dependencies into the global NuGet folder (`~\.nuget\packages`), using your `nuget.config` sources and credentials. Native DLLs (`runtimes\win-x64\native`) are loaded when the package calls them.
+- Versions follow NuGet: `1.2.3` means 1.2.3 or the lowest version above it, `*` the newest stable version, `1.*` the newest 1.x, and `[1.0,2.0)` a range. Without a version, `*` is used.
+- The resolved file list is cached in `%LOCALAPPDATA%\Csharp-in-AHK\nuget\restore`, so later runs start without restoring. Versions containing `*` are checked for updates once a day. If that check fails, for example when offline, the last result is used.
+- The NuGet client runs in its own `AssemblyLoadContext`, so its dependencies (such as Newtonsoft.Json) do not clash with the packages your script uses.
 
 ## Examples
 
@@ -187,7 +202,6 @@ The demos show their results with `MsgBox`.
 The Python examples need some extra setup:
 
 - **Python 3.10 or later, 64-bit.** The path to its DLL is set at the top of `pynet.cs` (e.g. `...\Python312\python312.dll`). You can also set the `PYTHONNET_PYDLL` environment variable instead. `pyplot1` also needs matplotlib and numpy (`pip install matplotlib`).
-- **The `pythonnet` 3.1.0 package in the local NuGet cache**, because packages are not downloaded automatically. For example, add it once to any project with `dotnet add package pythonnet --version 3.1.0`.
 - The Python engine stays loaded for the life of the AHK process, so later scripts reuse it. It cannot be restarted after `PythonEngine.Shutdown()`, so both examples call that only from `OnExit`.
 - `Pynet` always uses the Python installation its DLL belongs to. An inherited `VIRTUAL_ENV` variable, for example from a VS Code terminal, is ignored. Set `PYTHONHOME` to override this.
 
@@ -198,6 +212,7 @@ The Python examples need some extra setup:
 - **Code:** written by **[Claude](https://www.anthropic.com/claude)** (Anthropic), working through Claude Code under the direction of [burque505](https://github.com/burque505).
 - **Inspiration:** the idea, but no code, comes from *Powershell-in-AHK*, https://www.autohotkey.com/boards/viewtopic.php?f=83&t=141178, by user -+_[] .
 - **CLR interop:** based on concepts and techniques from **CLR.ahk** by Lexikos.
+- **NuGet support:** modeled on the NuGet package provider of [Keysharp](https://github.com/keysharp-org/Keysharp) (no code taken).
 
 ## License
 
