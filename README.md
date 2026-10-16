@@ -36,7 +36,7 @@ MsgBox RunCsx('return "Hello from C# on .NET " + Environment.Version;')
 |---|---|
 | AutoHotkey v2 | **64-bit only** (`AutoHotkey64.exe`) |
 | .NET runtime | .NET 8 or later, including **Microsoft.WindowsDesktop.App** |
-| Roslyn compiler | The `Roslyn` folder containing `csc.exe` and `Microsoft.CodeAnalysis*.dll`, e.g. from Visual Studio or Build Tools |
+| Roslyn compiler | The `Roslyn` folder containing `csc.exe` and `Microsoft.CodeAnalysis*.dll`, e.g. from Visual Studio or Build Tools. Without one, the compiler is downloaded from nuget.org automatically (see below). |
 
 ### Paths
 
@@ -50,11 +50,12 @@ Both libraries find the .NET runtime and the Roslyn compiler **automatically** t
    DotnetRoot=C:\Program Files\dotnet
    RoslynDir=C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\Roslyn
    ```
-4. **Auto-detection.** For .NET it tries `DOTNET_ROOT`, the registered x64 .NET install, `%ProgramFiles%\dotnet`, then the runtime bundled with Visual Studio. For Roslyn it searches Visual Studio and Build Tools installs, newest first, using `vswhere.exe`.
+4. **Auto-detection.** For .NET it tries `DOTNET_ROOT`, the registered x64 .NET install, `%ProgramFiles%\dotnet`, then the runtime bundled with Visual Studio. For Roslyn it searches Visual Studio and Build Tools installs, newest first, using `vswhere.exe`, then a compiler downloaded earlier by step 5.
+5. **Download (Roslyn only).** If no Roslyn was found, Microsoft's compiler package [Microsoft.Net.Compilers.Toolset](https://www.nuget.org/packages/Microsoft.Net.Compilers.Toolset) 5.9.0 (about 22 MB) is downloaded once from nuget.org. Its `tasks\net472` folder is extracted into `%LOCALAPPDATA%\Csharp-in-AHK\roslyn` and used. That folder has `csc.exe` and all the Roslyn DLLs both libraries need, so neither Visual Studio nor Build Tools is required. Extraction uses Windows' own `tar.exe` (Windows 10 1803 or later). To use another version, extract that package's `tasks\net472` folder yourself and set it as `RoslynDir`.
 
-Both libraries read the same environment variables and `.ini` file, so one setting covers both. A path you set in steps 1-3 is never replaced by auto-detection. If it is wrong, you get an error that says where the path came from.
+Both libraries read the same environment variables and `.ini` file, so one setting covers both. A path you set in steps 1-3 is never replaced by auto-detection or a download. If it is wrong, you get an error that says where the path came from.
 
-[`Csharp-in-AHK-Paths.ahk`](Csharp-in-AHK-Paths.ahk) is a small GUI that shows the detected paths and the path each library will use. It shows the user and system-wide environment variables, can create the missing ones with the paths in use (no registry editing needed), edits the user variables and `Csharp-in-AHK.ini`, and tests the result. It must be in the same folder as both libraries, because it edits the `Csharp-in-AHK.ini` they read. If a library is missing, it says which one and exits.
+[`Csharp-in-AHK-Paths.ahk`](Csharp-in-AHK-Paths.ahk) is a small GUI that shows the detected paths and the path each library will use. It shows the user and system-wide environment variables, can create the missing ones with the paths in use (no registry editing needed), edits the user variables and `Csharp-in-AHK.ini`, and tests the result. If no Roslyn is found, it says the compiler will be downloaded on first use. Test then downloads it, and the GUI shows the new folder as auto-detected. It must be in the same folder as both libraries, because it edits the `Csharp-in-AHK.ini` they read. If a library is missing, it says which one and exits.
 
 ![Csharp-in-AHK-Paths.ahk showing the environment variables, Csharp-in-AHK.ini and auto-detected paths for .NET and Roslyn](images/csharp-in-ahk-paths-gui.png)
 
@@ -78,7 +79,7 @@ If a required file is missing, the library throws an error that names the settin
 
 1. Clone or download this repository.
 2. Copy `Csharp-in-AHK.ahk` and/or `Csx-in-AHK.ahk` next to your script, or into your AHK `Lib` folder.
-3. If auto-detection doesn't find the right .NET or Roslyn, set the paths as shown above.
+3. If auto-detection doesn't find the right .NET or Roslyn, set the paths as shown above. If no Roslyn is installed at all, the first script run downloads it.
 4. `#Include` the library you want.
 
 ---

@@ -28,15 +28,19 @@ UserEnv := "HKCU\Environment"
 SystemEnv := "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment"
 Settings := [
     {Name: ".NET runtime", Env: "CSHARP_IN_AHK_DOTNET", Key: "DotnetRoot", Check: IsDotnetRoot, Detect: CsxDetectDotnet
-        , Hint: "Folder containing host\fxr and shared\Microsoft.NETCore.App (.NET 8 or later)", UserValue: "", SystemValue: "", ProcessValue: "", Detected: ""},
+        , Hint: "Folder containing host\fxr and shared\Microsoft.NETCore.App (.NET 8 or later)", Fallback: ""
+        , UserValue: "", SystemValue: "", ProcessValue: "", Detected: ""},
+    ; Without any Roslyn path, the libraries download Microsoft.Net.Compilers.Toolset on first use (auto-detection then finds it).
     {Name: "Roslyn compiler", Env: "CSHARP_IN_AHK_ROSLYN", Key: "RoslynDir", Check: IsRoslynDir, Detect: CsxDetectRoslyn
-        , Hint: "Folder containing csc.exe and the Microsoft.CodeAnalysis*.dll files", UserValue: "", SystemValue: "", ProcessValue: "", Detected: ""}
+        , Hint: "Folder containing csc.exe and the Microsoft.CodeAnalysis*.dll files", Fallback: "Microsoft.Net.Compilers.Toolset 5.9.0, downloaded from nuget.org on first use"
+        , UserValue: "", SystemValue: "", ProcessValue: "", Detected: ""}
 ]
 
 G := Gui(, "Csharp-in-AHK paths")
 G.SetFont("s9", "Segoe UI")
 G.AddText("w840", "Csharp-in-AHK.ahk and Csx-in-AHK.ahk use the first path found: a value set by the script, then the "
-    . "environment variable, then Csharp-in-AHK.ini, then auto-detection. Leave a field empty to skip that step.")
+    . "environment variable, then Csharp-in-AHK.ini, then auto-detection. If no Roslyn compiler is found at all, it is "
+    . "downloaded from nuget.org on first use. Leave a field empty to skip that step.")
 G.AddText("w840 y+8", "Library folder (where Csharp-in-AHK.ini is read and saved): " A_ScriptDir)
 for S in Settings {
     ; Columns: label, path, Browse, Delete (user variable only), OK/Invalid
@@ -90,13 +94,17 @@ Load(*) {
         if S.UserValue = "" && S.SystemValue = ""
             Missing .= (Missing = "" ? "" : " and ") S.Env
         S.IniEdit.Value := FileExist(Ini) ? IniRead(Ini, "Paths", S.Key, "") : ""
-        S.Detected := S.Detect.Call()
-        S.AutoEdit.Value := S.Detected != "" ? S.Detected : "(not found)"
+        Detect(S)
     }
     Loading := false
     Refresh()
     SB.SetText(Missing != "" ? Missing " not set. Create missing variables can write the paths in use."
         : FileExist(Ini) ? "Loaded " Ini : "No Csharp-in-AHK.ini yet. Save .ini creates it in " A_ScriptDir)
+}
+
+Detect(S) {
+    S.Detected := S.Detect.Call()
+    S.AutoEdit.Value := S.Detected != "" ? S.Detected : S.Fallback != "" ? "(not found: " S.Fallback ")" : "(not found)"
 }
 
 Refresh(*) {
@@ -109,6 +117,11 @@ Refresh(*) {
         S.DelBtn.Enabled := S.UserValue != ""
         Mark(S.IniOk, S.IniEdit.Value, S.Check)
         Path := Resolve(S, &From)
+        if Path = "" && S.Fallback != "" {
+            S.InUse.SetFont("cDefault")
+            S.InUse.Value := "In use: " S.Fallback
+            continue
+        }
         Text := Path = "" ? "In use: nothing found" : "In use: " Path "   (" From ")"
         Valid := Path != "" && S.Check.Call(Path)
         S.InUse.SetFont(Valid ? "cGreen" : "cRed")
@@ -233,7 +246,7 @@ DeleteVar(S, *) {
     if S.UserValue = ""
         return
     Path := Resolve(S, &From, true)
-    Then := Path != "" ? Path "`n(from " From ")" : "nothing (no path found)"
+    Then := Path != "" ? Path "`n(from " From ")" : S.Fallback != "" ? S.Fallback : "nothing (no path found)"
     if MsgBox("Delete the user variable " S.Env "?`n`nCurrent value:`n" S.UserValue "`n`nThe libraries will then use:`n" Then
         , "Delete variable", "YesNo Icon! Default2 Owner" G.Hwnd) != "Yes"
         return
@@ -302,7 +315,8 @@ Test(*) {
     F := FileOpen(Script, "w", "UTF-8"), F.Write(StrReplace(Source, "@DIR@", A_ScriptDir)), F.Close()
     for Btn in Buttons
         Btn.Enabled := false
-    SB.SetText("Testing... The first run with new paths compiles the host and can take several seconds.")
+    SB.SetText("Testing... The first run with new paths compiles the host"
+        . (Roslyn = "" ? " and downloads the compiler (about 22 MB)" : "") ", which can take a while.")
     try {
         RunWait(A_ComSpec ' /c ""' A_AhkPath '" /ErrorStdOut "' Script '" "' Dotnet '" "' Roslyn '" > "' Out '" 2>&1"', , "Hide")
         Result := FileExist(Out) ? Trim(FileRead(Out, "UTF-8"), "`r`n") : "No output"
@@ -312,6 +326,9 @@ Test(*) {
         Btn.Enabled := true
     try FileDelete(Script)
     try FileDelete(Out)
+    for S in Settings    ; the test may have downloaded the compiler, which auto-detection now finds
+        Detect(S)
+    Refresh()
     Failed := !(InStr(Result, "RunCsx: .NET ") && InStr(Result, "RunCSharp: "))    ; Passed only if both libraries ran
     SB.SetText(Failed ? "Test failed." : "Test passed.")
     MsgBox("DotnetRoot: " Dotnet "`nRoslynDir: " Roslyn "`n`n" Result, "Test " (Failed ? "failed" : "passed"), (Failed ? "Iconx" : "Iconi") " Owner" G.Hwnd)

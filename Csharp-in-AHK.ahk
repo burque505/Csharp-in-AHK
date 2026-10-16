@@ -56,8 +56,11 @@ global CSOutput := ""       ; Console output of the last script
 ;   2. The environment variables CSHARP_IN_AHK_DOTNET / CSHARP_IN_AHK_ROSLYN.
 ;   3. Csharp-in-AHK.ini next to this file, section [Paths], keys DotnetRoot / RoslynDir (see Csharp-in-AHK.example.ini).
 ;   4. Auto-detection. .NET: DOTNET_ROOT, the registered x64 .NET install, %ProgramFiles%\dotnet, then the runtime
-;      bundled with Visual Studio. Roslyn: Visual Studio / Build Tools installs, newest first (found with vswhere.exe).
-;   A path set in steps 1-3 is never replaced by auto-detection: if it is wrong, you get an error.
+;      bundled with Visual Studio. Roslyn: Visual Studio / Build Tools installs, newest first (found with vswhere.exe),
+;      then a compiler downloaded earlier by step 5.
+;   5. Roslyn only: if nothing was found, Microsoft's compiler package Microsoft.Net.Compilers.Toolset is downloaded
+;      once from nuget.org into %LOCALAPPDATA%\Csharp-in-AHK\roslyn (about 22 MB) and its tasks\net472 folder is used.
+;   A path set in steps 1-3 is never replaced by auto-detection or a download: if it is wrong, you get an error.
 ;   CSDotnetRoot must contain:
 ;     host\fxr\<version>\hostfxr.dll
 ;     shared\Microsoft.NETCore.App\<version>\           (.NET 8 or later)
@@ -657,6 +660,10 @@ _CSharpFindPaths(&DotnetFrom, &RoslynFrom) {
         RoslynFrom := "from " Ini
     if CSRoslynDir = ""
         CSRoslynDir := _CSharpDetectRoslyn(), RoslynFrom := "auto-detection"
+    if CSRoslynDir = ""
+        try CSRoslynDir := _CSharpDownloadRoslyn(), RoslynFrom := "downloaded from nuget.org"
+        catch as e
+            RoslynFrom := "auto-detection found nothing and the download failed: " e.Message
     CSDotnetRoot := RTrim(CSDotnetRoot, "\"), CSRoslynDir := RTrim(CSRoslynDir, "\")
 }
 
@@ -685,7 +692,37 @@ _CSharpDetectRoslyn() {
     for Install in _CSharpVsInstalls()
         if FileExist(Install "\MSBuild\Current\Bin\Roslyn\csc.exe") && FileExist(Install "\MSBuild\Current\Bin\Roslyn\Microsoft.CodeAnalysis.CSharp.dll")
             return Install "\MSBuild\Current\Bin\Roslyn"
-    return ""
+    Dir := _CSharpRoslynDownloadDir()
+    return FileExist(Dir "\csc.exe") && FileExist(Dir "\Microsoft.CodeAnalysis.CSharp.dll") ? Dir : ""
+}
+
+; Where _CSharpDownloadRoslyn puts the compiler (Csx-in-AHK.ahk uses the same folder).
+_CSharpRoslynDownloadDir() => EnvGet("LOCALAPPDATA") "\Csharp-in-AHK\roslyn\5.9.0\tasks\net472"
+
+; Downloads Microsoft.Net.Compilers.Toolset from nuget.org and extracts its tasks\net472 folder (csc.exe and the
+; Roslyn DLLs, including the scripting ones). A .nupkg is a zip file, which Windows' tar.exe can extract.
+_CSharpDownloadRoslyn() {
+    Dir := _CSharpRoslynDownloadDir()
+    if FileExist(Dir "\csc.exe")
+        return Dir
+    Version := "5.9.0", Root := EnvGet("LOCALAPPDATA") "\Csharp-in-AHK\roslyn"
+    Temp := Root "\" Version "-" DllCall("GetCurrentProcessId") ".tmp", Pkg := Temp ".nupkg"
+    DirCreate(Root)
+    try DirDelete(Temp, true)
+    DirCreate(Temp)
+    try {
+        Download("https://api.nuget.org/v3-flatcontainer/microsoft.net.compilers.toolset/" Version "/microsoft.net.compilers.toolset." Version ".nupkg", Pkg)
+        RunWait('"' A_WinDir '\System32\tar.exe" -xf "' Pkg '" -C "' Temp '" tasks/net472', , "Hide")
+        if !FileExist(Temp "\tasks\net472\csc.exe") || !FileExist(Temp "\tasks\net472\Microsoft.CodeAnalysis.CSharp.Scripting.dll")
+            throw Error("the package could not be extracted")
+        try DirMove(Temp, Root "\" Version)    ; fails if another process finished first, which is fine
+    } finally {
+        try FileDelete(Pkg)
+        try DirDelete(Temp, true)
+    }
+    if !FileExist(Dir "\csc.exe")
+        throw Error("the compiler could not be saved in " Root)
+    return Dir
 }
 
 ; Visual Studio and Build Tools install folders, newest first.
