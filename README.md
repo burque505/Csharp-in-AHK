@@ -175,7 +175,7 @@ using Microsoft.Data.Sqlite;
 ```
 
 - The first package reference downloads the NuGet client libraries (NuGet.Commands 7.9.0 and its dependencies, about 4 MB) from nuget.org into `%LOCALAPPDATA%\Csharp-in-AHK\nuget\client`. No .NET SDK is needed.
-- Packages are restored with dependencies into the global NuGet folder (`~\.nuget\packages`), using your `nuget.config` sources and credentials. Native DLLs (`runtimes\win-x64\native`) are loaded when the package calls them.
+- Packages are restored with dependencies into the global NuGet folder (`~\.nuget\packages`), using your `nuget.config` sources and credentials (nuget.org when no source is enabled). Native DLLs (`runtimes\win-x64\native`) are loaded when the package calls them.
 - Versions follow NuGet: `1.2.3` means 1.2.3 or the lowest version above it, `*` the newest stable version, `1.*` the newest 1.x, and `[1.0,2.0)` a range. Without a version, `*` is used.
 - The resolved file list is cached in `%LOCALAPPDATA%\Csharp-in-AHK\nuget\restore`, so later runs start without restoring. Versions containing `*` are checked for updates once a day. If that check fails, for example when offline, the last result is used.
 - The NuGet client runs in its own `AssemblyLoadContext`, so its dependencies (such as Newtonsoft.Json) do not clash with the packages your script uses.

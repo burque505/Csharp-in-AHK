@@ -36,7 +36,7 @@
 ; NUGET: package references are restored like `dotnet run app.cs` does, with the NuGet client libraries
 ;   (NuGet.Commands), which are downloaded once from nuget.org into %LOCALAPPDATA%\Csharp-in-AHK\nuget\client.
 ;   - Packages and their dependencies go to the global NuGet folder (~\.nuget\packages); nuget.config sources and
-;     credentials are used. Native DLLs (runtimes\win-x64\native) are found too.
+;     credentials are used (nuget.org when no source is enabled). Native DLLs (runtimes\win-x64\native) are found too.
 ;   - Versions follow NuGet: 1.2.3 means 1.2.3 or the lowest version above it, * is the newest stable version,
 ;     1.* the newest 1.x, [1.0,2.0) a range. Without a version, * is used.
 ;   - The resolved files are cached in %LOCALAPPDATA%\Csharp-in-AHK\nuget\restore, so later runs do not restore again.
@@ -471,6 +471,10 @@ _CsxHost() {
                     LibraryRange = new LibraryRange(p[0], VersionRange.Parse(p[1]), LibraryDependencyTarget.Package)
                 }).ToImmutableArray();
                 var sourceProvider = new PackageSourceProvider(settings);
+                // No source enabled (a NuGet.Config with none, or only offline ones): nuget.org, as on a computer that
+                // never configured one. Without it only the packages already downloaded are found (NU1100).
+                var sources = sourceProvider.LoadPackageSources().Where(s => s.IsEnabled).ToList();
+                if (sources.Count == 0) sources.Add(new PackageSource("https://api.nuget.org/v3/index.json", "nuget.org"));
                 var spec = new PackageSpec(new[] { new TargetFrameworkInformation {
                     FrameworkName = framework, TargetAlias = tfm, Dependencies = dependencies, RuntimeIdentifierGraphPath = graphFile } }) {
                     Name = "packages",
@@ -483,7 +487,7 @@ _CsxHost() {
                         ProjectUniqueName = project,
                         OutputPath = dir,
                         PackagesPath = SettingsUtility.GetGlobalPackagesFolder(settings),
-                        Sources = sourceProvider.LoadPackageSources().Where(s => s.IsEnabled).ToList(),
+                        Sources = sources,
                         FallbackFolders = SettingsUtility.GetFallbackPackageFolders(settings).ToList(),
                         ConfigFilePaths = settings.GetConfigFilePaths().ToList(),
                         OriginalTargetFrameworks = new List<string> { tfm },
@@ -505,7 +509,8 @@ _CsxHost() {
                 var requests = await RestoreRunner.GetRequests(args);
                 var result = (await RestoreRunner.RunWithoutCommit(requests, args)).Single().Result;
                 if (!result.Success)
-                    throw new Exception("NuGet restore failed:\r\n" + string.Join("\r\n", log.Errors.Distinct()));
+                    throw new Exception("NuGet restore failed:\r\n" + string.Join("\r\n", log.Errors.Distinct()) +
+                        "\r\nPackage sources: " + string.Join(", ", sources.Select(s => s.Source)) + " (NuGet.Config: " + string.Join(", ", settings.GetConfigFilePaths()) + ")");
 
                 var lockFile = result.LockFile;
                 var target = lockFile.Targets.First(t => t.RuntimeIdentifier == Rid);
