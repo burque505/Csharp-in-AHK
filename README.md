@@ -27,7 +27,7 @@ MsgBox RunCsx('return "Hello from C# on .NET " + Environment.Version;')
 - **Console output is captured.** `Console.Out` and `Console.Error` are collected and returned or exposed in a global variable.
 - **Compilation errors are thrown as AHK errors**, with the compiler diagnostics in the message.
 - **Directives:** `#r "Some.dll"`, `#r "nuget: Name, 1.2.3"`, `#:package Name@1.2.3` (NuGet packages, downloaded when missing), and `#load "Other.cs"`.
-- **Caching.** The host assembly is compiled once to `%TEMP%`, and compiled scripts are cached for the life of the AHK process.
+- **Caching.** The host assembly is compiled once to `%TEMP%`, and compiled scripts are cached for the life of the AHK process. Csharp-in-AHK also keeps compiled scripts on disk, so a later start loads them instead of compiling again, and can ship them precompiled (see [Shipping a program](#shipping-a-program-csharp-in-ahk)).
 - **Both libraries can be included together.** They share a single .NET runtime and use separate globals and functions.
 
 ## Requirements
@@ -161,9 +161,30 @@ A script file is recompiled automatically when it, or any file it `#load`s, chan
 1. On first use, the library loads `hostfxr.dll` from the configured .NET root. It starts the runtime with a generated `runtimeconfig.json` that targets `Microsoft.WindowsDesktop.App`.
 2. A small C# host, embedded in the `.ahk` file as source, is compiled once with Roslyn `csc.exe` into `%TEMP%\CSharp-in-AHK\` or `%TEMP%\Csx-in-AHK\`. The file name includes a CRC of the host source, runtime version and compiler version, so the host is rebuilt automatically when any of them changes.
 3. AHK calls the host's `[UnmanagedCallersOnly]` entry points (`Init`, `Run`) directly through `DllCall`.
-4. User scripts are compiled in memory with the Roslyn assemblies and executed. Results and captured output are marshalled back as UTF-16 strings.
+4. User scripts are compiled in memory with the Roslyn assemblies and executed (Csharp-in-AHK first looks for a precompiled or cached copy, see below). Results and captured output are marshalled back as UTF-16 strings.
 
 If one library has already started .NET, the other reuses the same runtime.
+
+## Compiled-script cache (Csharp-in-AHK)
+
+- A compiled script (a file or a string) is kept on disk in `%TEMP%\CSharp-in-AHK\scripts` (or `CacheDir\scripts`, see below). The file name has a hash of everything that went into the compilation: the sources and `#load`ed files, references, runtime, compiler and host. A later start loads it instead of compiling again, which for a large program is the difference between seconds and milliseconds. A changed source is simply compiled again, and the old copy for that script path is removed.
+- `CSHARP_IN_AHK_TRACE=<file>` (an environment variable) appends a line for each script compiled or loaded, with the time it took, for example `cached D:\app\main.cs: 21 ms`.
+
+## Shipping a program (Csharp-in-AHK)
+
+A program can carry everything it needs, so that nothing is downloaded or written outside its folder. Add these keys to the `[Paths]` section of `Csharp-in-AHK.ini` (relative paths are taken from the `.ini`'s folder):
+
+```ini
+[Paths]
+RoslynDir=lib\roslyn                  ; Microsoft.CodeAnalysis.dll and Microsoft.CodeAnalysis.CSharp.dll (no csc.exe needed with HostDll)
+HostDll=lib\host\CSHost-MyApp.dll      ; the host, built beforehand with CSharpBuildHost("lib\host", "CSHost-MyApp")
+PackagesManifest=lib\packages.txt     ; "compile|path", "runtime|path" and "native|path" lines: #:package resolves from these files, no restore
+CacheDir=lib\cache                    ; the host's runtimeconfig and the compiled-script cache, instead of %TEMP%
+```
+
+- **`CSharpBuildHost(OutDir, Name := "CSHost")`** builds the host assembly into `OutDir` with the .NET and compiler found now, and returns its path.
+- **`CSharpPrebuild(Script)`** compiles a script (a file, or a string as for `RunCSharp`) without running it, into `CacheDir\prebuilt`. That copy is named after a hash of what doesn't depend on where the program is (the sources with their paths relative to the script, the references' names and versions, the host's name), so it is used on any computer, from any folder, as long as the sources are the same. Edited sources are compiled as usual.
+- These keys are read by Csharp-in-AHK only. Csx-in-AHK reads the same `.ini` for `DotnetRoot` and `RoslynDir`, but not relative paths, so keep those two absolute in an `.ini` that Csx-in-AHK also uses.
 
 ## NuGet packages
 
