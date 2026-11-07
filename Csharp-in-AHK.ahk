@@ -273,6 +273,10 @@ _CSharpHostSource() {
             TextWriter oldOut = Console.Out, oldErr = Console.Error;
             Console.SetOut((mask & 1) != 0 ? writer : TextWriter.Null);
             Console.SetError((mask & 2) != 0 ? writer : TextWriter.Null);
+            // The script's awaits resume on the thread pool, not on this thread, which is waiting for them: with a
+            // SynchronizationContext here (Keysharp's WinForms one, or WPF's once a window was shown) they would deadlock.
+            var oldContext = System.Threading.SynchronizationContext.Current;
+            System.Threading.SynchronizationContext.SetSynchronizationContext(null);
             try {
                 object result = main.Invoke(null, BindingFlags.DoNotWrapExceptions, null,
                     main.GetParameters().Length == 1 ? new object[] { args } : null, null);
@@ -285,6 +289,7 @@ _CSharpHostSource() {
                 exitCode = ex.HResult;
                 Console.Error.WriteLine("Unhandled exception. " + Regex.Replace(ex.ToString(), @"\r?\n\s+at (System\.Reflection\.|CSHost\.)[^\r\n]*", ""));
             } finally {
+                System.Threading.SynchronizationContext.SetSynchronizationContext(oldContext);
                 Console.SetOut(oldOut);
                 Console.SetError(oldErr);
             }
