@@ -83,7 +83,8 @@ global CSOutput := ""       ; Console output of the last script
 ;                                      (paths relative to the manifest's folder): #:package lines resolve from it, with
 ;                                      no NuGet client, no restore and nothing in ~\.nuget
 ;   CacheDir=lib\cache                 where the host's runtimeconfig (and a host built here) go, instead of %TEMP%
-; DotnetRoot and RoslynDir may be relative there too.
+; DotnetRoot and RoslynDir may be relative there too. Csx-in-AHK.ahk reads the same keys (with CsxHostDll for its
+; own host), so one .ini serves a program that uses both.
 global CSDotnetRoot := IsSet(CSDotnetRoot) ? CSDotnetRoot : ""
 global CSRoslynDir := IsSet(CSRoslynDir) ? CSRoslynDir : ""
 global CSHostDll := IsSet(CSHostDll) ? CSHostDll : ""

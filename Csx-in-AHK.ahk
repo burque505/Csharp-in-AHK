@@ -26,7 +26,11 @@
 ;                              Missing packages are downloaded (see NUGET below).
 ;   - #load "Other.csx"        runs another script file first (its functions and classes become available)
 ;   - Relative paths are resolved against the script's folder (or the working directory for inline scripts).
-;   - Compiled scripts are cached per AHK process; a script is recompiled when it or a #load-ed file changes.
+;   - Compiled scripts are cached per AHK process; a script is recompiled when it or a #load-ed file changes. They are
+;     also kept on disk (CacheDir\csx-scripts, by default %TEMP%\Csx-in-AHK\csx-scripts), so that a later start loads
+;     them instead of compiling them again. CSHARP_IN_AHK_TRACE=<file> logs each compile or load with its time.
+;   - CsxPrebuild(Script) compiles a script (a file or a string) without running it, into CacheDir\csx-prebuilt, for a
+;     program that carries its scripts compiled: loaded from there wherever the program is, while the sources match.
 ;   - Calling Environment.Exit() inside a script terminates AutoHotkey too.
 ;
 ; Output configuration:
@@ -72,8 +76,22 @@ global CsxOutput := ""      ; Console output of the last script
 ;     Microsoft.CodeAnalysis.Scripting.dll
 ;     Microsoft.CodeAnalysis.CSharp.Scripting.dll
 ;   A standalone .NET install (e.g. C:\Program Files\dotnet) also works as CsxDotnetRoot.
+;
+; A PROGRAM THAT CARRIES EVERYTHING (nothing downloaded, nothing written outside its folder): Csharp-in-AHK.ini's
+; [Paths] section can also have these (paths relative to the .ini's folder, or full); Csharp-in-AHK.ahk reads them too:
+;   CsxHostDll=lib\host\CsxHost-Name.dll  this library's host, built beforehand (CsxBuildHost): csc.exe isn't needed
+;                                      then, only RoslynDir's Microsoft.CodeAnalysis*.dll (the two Scripting ones too).
+;                                      (HostDll is Csharp-in-AHK's own host.)
+;   PackagesManifest=lib\packages.txt  the packages' files, as "compile|path", "runtime|path" and "native|path" lines
+;                                      (paths relative to the manifest's folder): #:package and #r "nuget:" resolve
+;                                      from it, with no NuGet client, no restore and nothing in ~\.nuget
+;   CacheDir=lib\cache                 where the host's runtimeconfig (and a host built here) go, instead of %TEMP%
+; DotnetRoot and RoslynDir may be relative there too.
 global CsxDotnetRoot := IsSet(CsxDotnetRoot) ? CsxDotnetRoot : ""
 global CsxRoslynDir := IsSet(CsxRoslynDir) ? CsxRoslynDir : ""
+global CsxHostDll := IsSet(CsxHostDll) ? CsxHostDll : ""
+global CsxPackagesManifest := IsSet(CsxPackagesManifest) ? CsxPackagesManifest : ""
+global CsxCacheDir := IsSet(CsxCacheDir) ? CsxCacheDir : ""
 
 RunCsx(Script, Args*) {
     if Script ~= "i)^[^\r\n]+\.csx?$" && (Attrib := FileExist(Script)) && !InStr(Attrib, "D")
@@ -114,7 +132,7 @@ _CsxTakeString(Ptr) {
 }
 
 _CsxHost() {
-    global CsxDotnetRoot, CsxRoslynDir
+    global CsxDotnetRoot, CsxRoslynDir, CsxHostDll, CsxPackagesManifest, CsxCacheDir
     static RunFn := 0
     if RunFn
         return RunFn
@@ -124,10 +142,69 @@ _CsxHost() {
     Fxr := _CsxLatestDir(CsxDotnetRoot "\host\fxr") "\hostfxr.dll"
     if !NetCore || !FileExist(Fxr)
         throw Error(".NET 8 or later not found (" DotnetFrom "). CsxDotnetRoot must be a folder containing host\fxr and shared\Microsoft.NETCore.App.", -1, CsxDotnetRoot)
-    if !FileExist(CsxRoslynDir "\csc.exe") || !FileExist(CsxRoslynDir "\Microsoft.CodeAnalysis.CSharp.Scripting.dll")
+    ; (a host built beforehand needs no csc.exe, only the compiler's DLLs)
+    if CsxHostDll != "" && !FileExist(CsxHostDll)
+        throw Error("The C# script host was not found (CsxHostDll in Csharp-in-AHK.ini).", -1, CsxHostDll)
+    if CsxHostDll = "" && !FileExist(CsxRoslynDir "\csc.exe") || !FileExist(CsxRoslynDir "\Microsoft.CodeAnalysis.CSharp.Scripting.dll")
         throw Error("Roslyn not found (" RoslynFrom "). CsxRoslynDir must be a folder containing csc.exe and Microsoft.CodeAnalysis.CSharp.Scripting.dll.", -1, CsxRoslynDir)
+    ; (the host reads the packages' manifest from the environment: its C# runs before any script)
+    EnvSet("CSX_IN_AHK_PACKAGES", CsxPackagesManifest)
 
-    Source := "
+    Source := _CsxHostSource()
+
+    ; The host assembly is compiled once per host source / runtime / compiler version and cached (or built beforehand:
+    ; CsxHostDll). Its runtimeconfig names the runtime found here (a file of its own for each runtime version, so that a
+    ; program carried to another computer, with another .NET, still starts).
+    Cache := CsxCacheDir != "" ? CsxCacheDir : A_Temp "\Csx-in-AHK"
+    try DirCreate(Cache)
+    if !InStr(FileExist(Cache), "D")
+        Cache := A_Temp "\Csx-in-AHK"    ; (a folder that can't be written to: %TEMP% after all)
+    if CsxHostDll != "" {
+        Dll := CsxHostDll
+        SplitPath(Dll, , , , &Name)
+    } else {
+        Key := Source "|" NetCore "|" CsxRoslynDir "|" FileGetVersion(CsxRoslynDir "\Microsoft.CodeAnalysis.CSharp.dll")
+        Name := "CsxHost-" Format("{:08X}", DllCall("ntdll\RtlComputeCrc32", "uint", 0, "ptr", StrPtr(Key), "uint", StrLen(Key) * 2, "uint"))
+        Dll := Cache "\" Name ".dll"
+        if !FileExist(Dll)
+            _CsxBuildHost(Source, Cache, Name, NetCore)
+    }
+    EnvSet("CSX_IN_AHK_CACHE", Cache)    ; (compiled scripts are kept there too)
+    SplitPath(Desktop || NetCore, &Version)
+    Config := Cache "\" Name "-" Version ".runtimeconfig.json"
+    if !FileExist(Config) {
+        Framework := Desktop ? "Microsoft.WindowsDesktop.App" : "Microsoft.NETCore.App"
+        F := FileOpen(Config, "w", "UTF-8-RAW"), F.Write('{"runtimeOptions":{"framework":{"name":"' Framework '","version":"' Version '"}}}'), F.Close()
+    }
+
+    ; Start the runtime with hostfxr (https://learn.microsoft.com/dotnet/core/tutorials/netcore-hosting).
+    ; If another library already started .NET in this process, hostfxr reuses that runtime.
+    hFxr := DllCall("LoadLibrary", "str", Fxr, "ptr")
+    Proc := Export => DllCall("GetProcAddress", "ptr", hFxr, "astr", Export, "ptr")
+    Params := Buffer(3 * A_PtrSize, 0)
+    NumPut("ptr", Params.Size, "ptr", 0, "ptr", StrPtr(CsxDotnetRoot), Params)
+    Status := DllCall(Proc("hostfxr_initialize_for_runtime_config"), "wstr", Config, "ptr", Params, "ptr*", &Context := 0, "cdecl int")
+    if Status < 0 || !Context
+        throw Error(Format("Failed to initialize the .NET runtime (0x{:08X})", Status & 0xFFFFFFFF), -1, Config)
+    DllCall(Proc("hostfxr_get_runtime_delegate"), "ptr", Context, "int", 7, "ptr*", &LoadAssembly := 0, "cdecl int")    ; hdt_load_assembly
+    DllCall(Proc("hostfxr_get_runtime_delegate"), "ptr", Context, "int", 6, "ptr*", &GetFunction := 0, "cdecl int")     ; hdt_get_function_pointer
+    DllCall(Proc("hostfxr_close"), "ptr", Context, "cdecl int")
+    if !LoadAssembly || !GetFunction
+        throw Error("This .NET runtime does not support in-process hosting (.NET 8 or later is required).", -1)
+    if Status := DllCall(LoadAssembly, "wstr", Dll, "ptr", 0, "ptr", 0, "int")
+        throw Error(Format("Failed to load the C# script host (0x{:08X})", Status & 0xFFFFFFFF), -1, Dll)
+    for Method in ["Init", "Run"] {
+        ; delegate_type_name = -1 (UNMANAGEDCALLERSONLY_METHOD)
+        if Status := DllCall(GetFunction, "wstr", "CsxHost, " Name, "wstr", Method, "ptr", -1, "ptr", 0, "ptr", 0, "ptr*", &Fn := 0, "int")
+            throw Error(Format("Failed to get CsxHost.{} (0x{:08X})", Method, Status & 0xFFFFFFFF), -1)
+        if Method = "Init"
+            DllCall(Fn, "wstr", CsxRoslynDir, "int")
+    }
+    return RunFn := Fn
+}
+
+_CsxHostSource() {
+    static Source := "
     (
     using System;
     using System.Collections;
@@ -149,6 +226,7 @@ _CsxHost() {
     using Microsoft.CodeAnalysis;
     using Microsoft.CodeAnalysis.CSharp;
     using Microsoft.CodeAnalysis.CSharp.Scripting;
+    using Microsoft.CodeAnalysis.Emit;
     using Microsoft.CodeAnalysis.Scripting;
 
     // Globals visible to scripts.
@@ -196,6 +274,7 @@ _CsxHost() {
 
         static string Execute(string source, string file, string[] args, int mask, ref string value) {
             Func<object, Task<object>> run = ScriptCompiler.Compile(source, file);
+            if (Environment.GetEnvironmentVariable("CSX_IN_AHK_PREBUILD") == "1") return "";    // (CsxPrebuild: compiled only)
             var output = new StringWriter();
             var writer = TextWriter.Synchronized(output);
             TextWriter oldOut = Console.Out, oldErr = Console.Error;
@@ -206,7 +285,7 @@ _CsxHost() {
                 if (result != null) value = Format(result);
             } catch (Exception ex) {
                 Console.Error.WriteLine("Unhandled exception. " + Regex.Replace(ex.ToString(),
-                    @"\r?\n\s*(at (Microsoft\.CodeAnalysis\.|CsxHost\.|System\.Runtime\.CompilerServices\.|System\.Threading\.Tasks\.)[^\r\n]*|--- End of stack trace[^\r\n]*)", ""));
+                    @"\r?\n\s*(at (Microsoft\.CodeAnalysis\.|CsxHost\.|ScriptCompiler\.|System\.Reflection\.|System\.Runtime\.CompilerServices\.|System\.Threading\.Tasks\.)[^\r\n]*|--- End of stack trace[^\r\n]*)", ""));
             } finally {
                 Console.SetOut(oldOut);
                 Console.SetError(oldErr);
@@ -255,8 +334,41 @@ _CsxHost() {
             string key = dir + "\0" + file + "\0" + string.Join("\0", refs) + "\0" + source;
             if (cache.TryGetValue(key, out var cached) && cached.Files.All(f => File.Exists(f.Path) && File.GetLastWriteTimeUtc(f.Path) == f.Time))
                 return cached.Run;
+            var traceWatch = System.Diagnostics.Stopwatch.StartNew();
 
-            frameworkRefs ??= ((string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")).Split(Path.PathSeparator)
+            // A program can carry its scripts compiled (CsxPrebuild): CSX_IN_AHK_CACHE\csx-prebuilt\Name-Hash.dll, the hash of
+            // what doesn't depend on where the program is (the source, the script's file name, the references' names and
+            // versions, the host's name), so that even its first start compiles nothing. Beside it, Name-Hash.deps names the
+            // entry point, the #load-ed files (relative to the script's folder, with a hash of their contents) and the #r
+            // references, which are only known once compiled: the copy is used only while those files are the same.
+            string cacheDir = Environment.GetEnvironmentVariable("CSX_IN_AHK_CACHE");
+            bool prebuild = Environment.GetEnvironmentVariable("CSX_IN_AHK_PREBUILD") == "1";
+            string prebuiltBase = null, prebuiltName = null, diskBase = null, diskPrefix = null;
+            if (!string.IsNullOrEmpty(cacheDir)) {
+                prebuiltName = (file != null ? Path.GetFileNameWithoutExtension(file) : "inline") + "-";
+                prebuiltBase = Path.Combine(cacheDir, "csx-prebuilt", prebuiltName + PortableHash(file, source, refs, packages));
+                if (!prebuild && Load(prebuiltBase, dir, file) is Entry prebuilt) {
+                    Trace("prebuilt", file, traceWatch);
+                    return (cache[key] = prebuilt).Run;
+                }
+                // A script (from a file, or a string) is kept compiled on disk (CSX_IN_AHK_CACHE\csx-scripts), named after a
+                // hash of its path (if any) and of everything compiled (source, references, runtime, compiler and host), so
+                // that the next start loads it instead of compiling it again; one copy per script path, the older ones
+                // removed (strings: kept).
+                if (!prebuild) {
+                    diskPrefix = file != null ? "script-" + Hash(file.ToLowerInvariant(), 8) + "-" : "inline-";
+                    diskBase = Path.Combine(cacheDir, "csx-scripts", diskPrefix + Hash(key + "\0" + string.Join("\0", Imports)
+                        + "\0" + RuntimeEnvironment.GetRuntimeDirectory() + "\0" + typeof(CSharpScript).Assembly.GetName().Version
+                        + "\0" + typeof(CsxGlobals).Assembly.FullName
+                        + "\0" + string.Join("\0", refs.Select(r => File.Exists(r) ? new FileInfo(r).Length + ":" + File.GetLastWriteTimeUtc(r).Ticks : "")), 8));
+                    if (Load(diskBase, dir, file) is Entry stored) {
+                        Trace("cached", file, traceWatch);
+                        return (cache[key] = stored).Run;
+                    }
+                }
+            }
+
+            frameworkRefs ??=((string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")).Split(Path.PathSeparator)
                 .Select(path => (MetadataReference)MetadataReference.CreateFromFile(path)).ToList();
             var options = ScriptOptions.Default
                 .WithReferences(frameworkRefs.Concat(refs.Select(path => MetadataReference.CreateFromFile(path))))
@@ -269,22 +381,124 @@ _CsxHost() {
                 .WithOptimizationLevel(OptimizationLevel.Release)
                 .WithAllowUnsafe(true);
 
+            // The script is compiled and emitted here (not with Script.CreateDelegate), so that the same assembly can be kept
+            // on disk: its entry point is the submission's factory, called with the globals as Roslyn's own runner does.
             var script = CSharpScript.Create<object>(source, options, typeof(CsxGlobals));
-            var errors = script.Compile().Where(d => d.Severity == DiagnosticSeverity.Error).ToList();
-            if (errors.Count > 0)
-                throw new Exception("C# compilation failed:\r\n" + string.Join("\r\n", errors));
             var compilation = script.GetCompilation();
-            foreach (var reference in compilation.DirectiveReferences.OfType<PortableExecutableReference>())
-                if (reference.FilePath != null) CsxHost.RefPaths[Path.GetFileNameWithoutExtension(reference.FilePath)] = reference.FilePath;
+            using var pe = new MemoryStream();
+            using var pdb = new MemoryStream();
+            var result = compilation.Emit(pe, pdb, options: new EmitOptions(debugInformationFormat: DebugInformationFormat.PortablePdb));
+            var errors = result.Diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error).ToList();
+            if (!result.Success || errors.Count > 0)
+                throw new Exception("C# compilation failed:\r\n" + string.Join("\r\n", errors));
+            var directiveRefs = compilation.DirectiveReferences.OfType<PortableExecutableReference>()
+                .Select(reference => reference.FilePath).Where(path => path != null).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            foreach (var path in directiveRefs) CsxHost.RefPaths[Path.GetFileNameWithoutExtension(path)] = path;
 
-            var runner = script.CreateDelegate();
-            var entry = new Entry {
-                Run = globals => runner(globals),
-                Files = compilation.SyntaxTrees.Select(t => t.FilePath).Where(File.Exists).Distinct(StringComparer.OrdinalIgnoreCase)
-                    .Select(path => (path, File.GetLastWriteTimeUtc(path))).ToList()
-            };
+            var entryPoint = compilation.GetEntryPoint(CancellationToken.None);
+            var type = entryPoint.ContainingType;
+            string typeName = (type.ContainingNamespace.IsGlobalNamespace ? "" : type.ContainingNamespace.ToDisplayString() + ".") + type.MetadataName;
+            var entry = MakeEntry(Assembly.Load(pe.ToArray(), pdb.ToArray()), typeName, entryPoint.MetadataName,
+                compilation.SyntaxTrees.Select(t => t.FilePath).Where(File.Exists).Distinct(StringComparer.OrdinalIgnoreCase).ToList());
+
+            if (diskBase != null || prebuild && prebuiltBase != null) {
+                // The .deps file: the entry point, the #load-ed files with a hash of their contents, the #r references
+                // (the runtime's own are found again anyway).
+                var deps = new StringBuilder("entry|" + typeName + "|" + entryPoint.MetadataName + "\n");
+                foreach (var path in compilation.SyntaxTrees.Select(t => t.FilePath)
+                        .Where(path => !string.IsNullOrEmpty(path) && Path.IsPathRooted(path) && File.Exists(path)
+                            && !string.Equals(Path.GetFullPath(path), file, StringComparison.OrdinalIgnoreCase))
+                        .Distinct(StringComparer.OrdinalIgnoreCase))
+                    deps.Append("load|").Append(Path.GetRelativePath(dir, path)).Append('|').Append(FileHash(path)).Append('\n');
+                var runtime = Path.GetFullPath(RuntimeEnvironment.GetRuntimeDirectory());
+                foreach (var path in directiveRefs.Where(path => !Path.GetFullPath(path).StartsWith(runtime, StringComparison.OrdinalIgnoreCase)))
+                    deps.Append("ref|").Append(Path.GetRelativePath(dir, path)).Append('\n');
+                if (diskBase != null)
+                    try {
+                        string folder = Path.GetDirectoryName(diskBase), tmp = diskBase + "." + Environment.ProcessId + ".tmp";
+                        Directory.CreateDirectory(folder);
+                        foreach (var old in file != null ? Directory.GetFiles(folder, diskPrefix + "*") : Array.Empty<string>())
+                            try { File.Delete(old); } catch (Exception) { }    // (another instance may be loading it: left for later)
+                        Save(diskBase, tmp, pe, pdb, deps.ToString());
+                    } catch (Exception) { }    // (a cache that can't be written: compiled again next time)
+                if (prebuild && prebuiltBase != null) {
+                    string folder = Path.GetDirectoryName(prebuiltBase);
+                    Directory.CreateDirectory(folder);
+                    foreach (var old in file != null ? Directory.GetFiles(folder, prebuiltName + "*") : Array.Empty<string>()) File.Delete(old);
+                    Save(prebuiltBase, prebuiltBase + "." + Environment.ProcessId + ".tmp", pe, pdb, deps.ToString());
+                }
+            }
+            Trace("compile", file, traceWatch);
             cache[key] = entry;
             return entry.Run;
+        }
+
+        // The compiled script's runner: the submission's factory, given the globals in slot 0 of the submission array.
+        static Entry MakeEntry(Assembly assembly, string typeName, string methodName, List<string> files) {
+            var factory = assembly.GetType(typeName, true).GetMethod(methodName, BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+            return new Entry {
+                Run = globals => (Task<object>)factory.Invoke(null, BindingFlags.DoNotWrapExceptions, null, new object[] { new object[] { globals, null } }, null),
+                Files = files.Select(path => (path, File.GetLastWriteTimeUtc(path))).ToList()
+            };
+        }
+
+        // A script compiled before (Base.dll, .pdb, .deps), if its #load-ed files are the same and its #r references are
+        // there; else null (and it is compiled).
+        static Entry Load(string b, string dir, string file) {
+            try {
+                if (!File.Exists(b + ".dll") || !File.Exists(b + ".deps")) return null;
+                string typeName = null, methodName = null;
+                var files = new List<string>();
+                if (file != null) files.Add(file);
+                var refPaths = new List<string>();
+                foreach (var line in File.ReadAllLines(b + ".deps")) {
+                    var parts = line.Split('|');
+                    if (parts[0] == "entry" && parts.Length == 3) { typeName = parts[1]; methodName = parts[2]; }
+                    else if (parts[0] == "load" && parts.Length == 3) {
+                        string path = Path.GetFullPath(Path.Combine(dir, parts[1]));
+                        if (!File.Exists(path) || FileHash(path) != parts[2]) return null;
+                        files.Add(path);
+                    } else if (parts[0] == "ref" && parts.Length == 2) {
+                        string path = Path.GetFullPath(Path.Combine(dir, parts[1]));
+                        if (!File.Exists(path)) return null;
+                        refPaths.Add(path);
+                    }
+                }
+                if (typeName == null) return null;
+                foreach (var path in refPaths) CsxHost.RefPaths[Path.GetFileNameWithoutExtension(path)] = path;
+                return MakeEntry(Assembly.Load(File.ReadAllBytes(b + ".dll"), File.Exists(b + ".pdb") ? File.ReadAllBytes(b + ".pdb") : null),
+                    typeName, methodName, files);
+            } catch (Exception) { return null; }    // (a damaged or outdated copy: compiled again)
+        }
+
+        static void Save(string b, string tmp, MemoryStream pe, MemoryStream pdb, string deps) {
+            File.WriteAllText(tmp + "d", deps);
+            File.Move(tmp + "d", b + ".deps", true);
+            File.WriteAllBytes(tmp + "p", pdb.ToArray());
+            File.Move(tmp + "p", b + ".pdb", true);
+            File.WriteAllBytes(tmp, pe.ToArray());
+            File.Move(tmp, b + ".dll", true);    // (the .dll last: it is what says the copy is complete)
+        }
+
+        static string PortableHash(string file, string source, List<string> refs, List<string> packages) {
+            var key = new StringBuilder(string.Join(",", Imports)).Append('\0').Append(typeof(CsxGlobals).Assembly.GetName().Name)
+                .Append('\0').Append(file != null ? Path.GetFileName(file).ToLowerInvariant() : "");
+            foreach (var package in packages) key.Append('\0').Append(package);
+            foreach (var reference in refs) {
+                string version = "";
+                try { version = AssemblyName.GetAssemblyName(reference).Version?.ToString(); } catch (Exception) { }
+                key.Append('\0').Append(Path.GetFileName(reference).ToLowerInvariant()).Append(':').Append(version);
+            }
+            key.Append('\0').Append(source);
+            return Hash(key.ToString(), 12);
+        }
+
+        static string Hash(string s, int bytes) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(s)), 0, bytes);
+        static string FileHash(string path) => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path)), 0, 12);
+
+        static void Trace(string what, string file, System.Diagnostics.Stopwatch watch) {
+            if (Environment.GetEnvironmentVariable("CSHARP_IN_AHK_TRACE") is string trace && trace != "")
+                try { File.AppendAllText(trace, $"csx {what} {file}: {watch.ElapsedMilliseconds} ms\r\n"); } catch (Exception) { }
         }
     }
 
@@ -306,8 +520,17 @@ _CsxHost() {
             return name + "|" + (version == "" ? "*" : version);
         }
 
-        // Restores the packages with their dependencies and returns the assemblies to compile against.
+        // Restores the packages with their dependencies and returns the assemblies to compile against. With a manifest
+        // (CSX_IN_AHK_PACKAGES: PackagesManifest in Csharp-in-AHK.ini), its files instead: nothing is restored.
         public static List<string> Resolve(List<string> packages) {
+            string manifest = Environment.GetEnvironmentVariable("CSX_IN_AHK_PACKAGES");
+            if (!string.IsNullOrEmpty(manifest) && File.Exists(manifest)) {
+                string from = Path.GetDirectoryName(Path.GetFullPath(manifest));
+                return FromLines(File.ReadAllLines(manifest).Where(line => line.Contains('|')).Select(line => {
+                    int bar = line.IndexOf('|');
+                    return line.Substring(0, bar) + "|" + Path.GetFullPath(Path.Combine(from, line.Substring(bar + 1)));
+                }).ToArray());
+            }
             string tfm = "net" + Environment.Version.Major + ".0-windows7.0";    // what the SDK uses for -windows
             var list = packages.Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(p => p, StringComparer.OrdinalIgnoreCase).ToArray();
             string key = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
@@ -333,9 +556,14 @@ _CsxHost() {
                 }
             }
 
+            return resolved[key] = FromLines(lines);
+        }
+
+        // The assemblies to compile against, from restore result lines (the runtime's and the native ones noted).
+        static List<string> FromLines(string[] lines) {
             framework ??= new(((string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")).Split(Path.PathSeparator)
                 .Select(Path.GetFileNameWithoutExtension), StringComparer.OrdinalIgnoreCase);
-            refs = new List<string>();
+            var refs = new List<string>();
             foreach (var line in lines) {
                 int i = line.IndexOf('|');
                 string kind = line.Substring(0, i), path = line.Substring(i + 1), name = Path.GetFileNameWithoutExtension(path);
@@ -344,7 +572,7 @@ _CsxHost() {
                 else if (kind == "compile") refs.Add(path);
                 else if (kind == "runtime") CsxHost.RefPaths[name] = path;
             }
-            return resolved[key] = refs;
+            return refs;
         }
 
         // The last restore result, unless it is missing files or (for versions with *) older than a day.
@@ -554,44 +782,7 @@ _CsxHost() {
         }
     }
     )"
-
-    ; The host assembly is compiled once per host source / runtime / compiler version and cached.
-    Key := Source "|" NetCore "|" CsxRoslynDir "|" FileGetVersion(CsxRoslynDir "\Microsoft.CodeAnalysis.CSharp.dll")
-    Name := "CsxHost-" Format("{:08X}", DllCall("ntdll\RtlComputeCrc32", "uint", 0, "ptr", StrPtr(Key), "uint", StrLen(Key) * 2, "uint"))
-    Cache := A_Temp "\Csx-in-AHK"
-    Dll := Cache "\" Name ".dll", Config := Cache "\" Name ".runtimeconfig.json"
-    if !FileExist(Dll)
-        _CsxBuildHost(Source, Cache, Name, NetCore)
-    if !FileExist(Config) {
-        SplitPath(Desktop || NetCore, &Version)
-        Framework := Desktop ? "Microsoft.WindowsDesktop.App" : "Microsoft.NETCore.App"
-        F := FileOpen(Config, "w", "UTF-8-RAW"), F.Write('{"runtimeOptions":{"framework":{"name":"' Framework '","version":"' Version '"}}}'), F.Close()
-    }
-
-    ; Start the runtime with hostfxr (https://learn.microsoft.com/dotnet/core/tutorials/netcore-hosting).
-    ; If another library already started .NET in this process, hostfxr reuses that runtime.
-    hFxr := DllCall("LoadLibrary", "str", Fxr, "ptr")
-    Proc := Export => DllCall("GetProcAddress", "ptr", hFxr, "astr", Export, "ptr")
-    Params := Buffer(3 * A_PtrSize, 0)
-    NumPut("ptr", Params.Size, "ptr", 0, "ptr", StrPtr(CsxDotnetRoot), Params)
-    Status := DllCall(Proc("hostfxr_initialize_for_runtime_config"), "wstr", Config, "ptr", Params, "ptr*", &Context := 0, "cdecl int")
-    if Status < 0 || !Context
-        throw Error(Format("Failed to initialize the .NET runtime (0x{:08X})", Status & 0xFFFFFFFF), -1, Config)
-    DllCall(Proc("hostfxr_get_runtime_delegate"), "ptr", Context, "int", 7, "ptr*", &LoadAssembly := 0, "cdecl int")    ; hdt_load_assembly
-    DllCall(Proc("hostfxr_get_runtime_delegate"), "ptr", Context, "int", 6, "ptr*", &GetFunction := 0, "cdecl int")     ; hdt_get_function_pointer
-    DllCall(Proc("hostfxr_close"), "ptr", Context, "cdecl int")
-    if !LoadAssembly || !GetFunction
-        throw Error("This .NET runtime does not support in-process hosting (.NET 8 or later is required).", -1)
-    if Status := DllCall(LoadAssembly, "wstr", Dll, "ptr", 0, "ptr", 0, "int")
-        throw Error(Format("Failed to load the C# script host (0x{:08X})", Status & 0xFFFFFFFF), -1, Dll)
-    for Method in ["Init", "Run"] {
-        ; delegate_type_name = -1 (UNMANAGEDCALLERSONLY_METHOD)
-        if Status := DllCall(GetFunction, "wstr", "CsxHost, " Name, "wstr", Method, "ptr", -1, "ptr", 0, "ptr", 0, "ptr*", &Fn := 0, "int")
-            throw Error(Format("Failed to get CsxHost.{} (0x{:08X})", Method, Status & 0xFFFFFFFF), -1)
-        if Method = "Init"
-            DllCall(Fn, "wstr", CsxRoslynDir, "int")
-    }
-    return RunFn := Fn
+    return Source
 }
 
 _CsxBuildHost(Source, Cache, Name, NetCore) {
@@ -611,6 +802,29 @@ _CsxBuildHost(Source, Cache, Name, NetCore) {
         try FileDelete(Base ".dll")
         throw Error("Failed to compile the C# script host", -2, FileExist(Base ".log") ? FileRead(Base ".log") : "")
     }
+}
+
+; Builds the script host assembly into a folder (as OutDir\Name.dll), with the .NET and compiler that would be used now:
+; for a program that carries everything (CsxHostDll in Csharp-in-AHK.ini). Returns its path.
+CsxBuildHost(OutDir, Name := "CsxHost") {
+    global CsxDotnetRoot, CsxRoslynDir
+    _CsxFindPaths(&DotnetFrom, &RoslynFrom)
+    NetCore := _CsxLatestDir(CsxDotnetRoot "\shared\Microsoft.NETCore.App")
+    if !NetCore || !FileExist(CsxRoslynDir "\csc.exe")
+        throw Error("Building the script host needs .NET (" DotnetFrom ") and csc.exe (" RoslynFrom ").", -1)
+    _CsxBuildHost(_CsxHostSource(), OutDir, Name, NetCore)
+    for Extension in [".cs", ".rsp", ".log"]
+        try FileDelete(OutDir "\" Name Extension)
+    return OutDir "\" Name ".dll"
+}
+
+; Compiles a script (a file, or a string as for RunCsx) without running it, into CacheDir\csx-prebuilt (see
+; Csharp-in-AHK.ini), for a program that carries its scripts compiled: they are loaded from there, wherever the program
+; is, as long as their sources (and the files they #load) are the same.
+CsxPrebuild(Script) {
+    EnvSet("CSX_IN_AHK_PREBUILD", "1")
+    try RunCsx(Script)
+    finally EnvSet("CSX_IN_AHK_PREBUILD")
 }
 
 _CsxIsManaged(Path) {
@@ -646,7 +860,17 @@ _CsxFindPaths(&DotnetFrom, &RoslynFrom) {
         try CsxRoslynDir := _CsxDownloadRoslyn(), RoslynFrom := "downloaded from nuget.org"
         catch as e
             RoslynFrom := "auto-detection found nothing and the download failed: " e.Message
-    CsxDotnetRoot := RTrim(CsxDotnetRoot, "\"), CsxRoslynDir := RTrim(CsxRoslynDir, "\")
+    global CsxHostDll, CsxPackagesManifest, CsxCacheDir
+    if CsxHostDll = ""
+        CsxHostDll := IniRead(Ini, "Paths", "CsxHostDll", "")
+    if CsxPackagesManifest = ""
+        CsxPackagesManifest := IniRead(Ini, "Paths", "PackagesManifest", "")
+    if CsxCacheDir = ""
+        CsxCacheDir := IniRead(Ini, "Paths", "CacheDir", "")
+    ; (relative paths: from the .ini's folder)
+    Full(Path) => Path = "" || Path ~= "^(\\\\|[A-Za-z]:)" ? Path : Dir "\" Path
+    CsxDotnetRoot := RTrim(Full(CsxDotnetRoot), "\"), CsxRoslynDir := RTrim(Full(CsxRoslynDir), "\")
+    CsxHostDll := Full(CsxHostDll), CsxPackagesManifest := Full(CsxPackagesManifest), CsxCacheDir := RTrim(Full(CsxCacheDir), "\")
 }
 
 _CsxDetectDotnet() {
