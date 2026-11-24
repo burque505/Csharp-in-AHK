@@ -244,6 +244,7 @@ using Microsoft.Data.Sqlite;
 | [`cs_types_ex1.ahk`](cs_types_ex1.ahk) | The same with `RunCSharp` (top-level statements): results via `AHK.Return`, console output and the exit code, plus a local function and a `record` |
 | [`tgui1.ahk`](tgui1.ahk) / [`tgui.cs`](tgui.cs) | A [Terminal.Gui](https://github.com/gui-cs/Terminal.Gui) wizard in a console window (`//#console`) |
 | [`tgui2.ahk`](tgui2.ahk) / [`tgui2.cs`](tgui2.cs) | A Terminal.Gui login window that can be closed with the console's X button (`AHK.ConsoleClosed`); the user name is returned to AHK |
+| [`tgui1_csx.ahk`](tgui1_csx.ahk) / [`tgui1.csx`](tgui1.csx)<br>[`tgui2_csx.ahk`](tgui2_csx.ahk) / [`tgui2.csx`](tgui2.csx) | The same two Terminal.Gui examples as C# scripts with `RunCsx`; both can be closed with the X button and return their result |
 | [`Example.csx`](Example.csx) / [`ExampleHelpers.csx`](ExampleHelpers.csx) | A script file that uses `#load` to pull in helper functions and classes |
 | [`pynet1.ahk`](pynet1.ahk) / [`pynet1.cs`](pynet1.cs) | Python inside AutoHotkey through [Python.NET](https://github.com/pythonnet/pythonnet): calling Python functions from C#, `import math`, `eval`, `print()` captured in the output |
 | [`pyplot1.ahk`](pyplot1.ahk) / [`pyplot1.cs`](pyplot1.cs) | WinForms and matplotlib in one window: five plots (3D surface, Lissajous, polar rose, Mandelbrot, complex phase field) with live sliders, colormaps, dark theme, animation and PNG export. The saved file's path is returned to AHK |
