@@ -35,6 +35,19 @@
 ;   Bitmask: 1=Console.Out 2=Console.Error (including unhandled exceptions)
 ;   Compilation errors are thrown as AHK errors.
 ;
+; CONSOLE APPS: AutoHotkey has no console window, so console output is captured (above) and Console.ReadLine gets
+;   nothing. A script that needs a real console (Console.ReadLine/ReadKey, Terminal.Gui, Spectre.Console, ...) gets one
+;   when CSConsole is true, or when the script has a line that is just  //#console  (an ordinary comment for dotnet run).
+;   - The console opens when the script starts and closes when it ends; AutoHotkey waits meanwhile.
+;   - Output then goes to the console, not to CSOutput; an unhandled exception is written to both.
+;   - Closing a console window ends AutoHotkey too, whatever the script does. So the window's X button and Alt+F4 are
+;     caught first and only cancel AHK.ConsoleClosed (a CancellationToken): Console.ReadLine then returns null, and a
+;     script that waits otherwise should end itself, e.g. for Terminal.Gui:
+;       AHK.ConsoleClosed.Register(() => Application.MainLoop.Invoke(() => Application.RequestStop()));
+;     The window closes when the script has ended. The window menu (its icon, Alt+Space) is blocked, since it has
+;     Close too. Closing it any other way (the taskbar's Close window, or the tab when Windows Terminal hosts
+;     consoles, where none of this applies) still ends AutoHotkey. Ctrl+C / Ctrl+Break are ignored for the same reason.
+;
 ; NUGET: package references are restored like `dotnet run app.cs` does, with the NuGet client libraries
 ;   (NuGet.Commands), which are downloaded once from nuget.org into %LOCALAPPDATA%\Csharp-in-AHK\nuget\client.
 ;   - Packages and their dependencies go to the global NuGet folder (~\.nuget\packages); nuget.config sources and
@@ -51,6 +64,7 @@
 ;   Developed with AI assistance.
 
 global CSStreams := 3       ; Bitmask: 1=Console.Out 2=Console.Error
+global CSConsole := IsSet(CSConsole) ? CSConsole : false    ; true: every script runs in a console window (see above)
 global CSExitCode := 0      ; Exit code of the last script (its int return value, or the HRESULT of an unhandled exception)
 global CSOutput := ""       ; Console output of the last script
 
@@ -104,7 +118,7 @@ RunCSharpFile(Path, Args*) {
 }
 
 _CSharpRun(Source, Path, Args) {
-    global CSStreams, CSExitCode, CSOutput
+    global CSStreams, CSConsole, CSExitCode, CSOutput
     RunFn := _CSharpHost()
     Size := Args.Length * A_PtrSize
     for Arg in Args
@@ -115,7 +129,7 @@ _CSharpRun(Source, Path, Args) {
         Offset += StrPut(String(Arg), Argv.Ptr + Offset, "UTF-16")    ; StrPut returns bytes written
     }
     Status := DllCall(RunFn, "ptr", Path = "" ? StrPtr(Source) : 0, "ptr", Path = "" ? 0 : StrPtr(Path), "ptr", Argv, "int", Args.Length
-        , "int", CSStreams, "int*", &ExitCode := 0, "ptr*", &OutPtr := 0, "ptr*", &ResultPtr := 0, "int")
+        , "int", CSStreams | (CSConsole ? 4 : 0), "int*", &ExitCode := 0, "ptr*", &OutPtr := 0, "ptr*", &ResultPtr := 0, "int")
     Output := _CSharpTakeString(OutPtr)
     if Status
         throw Error(Output, -1)
@@ -271,8 +285,11 @@ _CSharpHostSource() {
             var output = new StringWriter();
             var writer = TextWriter.Synchronized(output);
             TextWriter oldOut = Console.Out, oldErr = Console.Error;
-            Console.SetOut((mask & 1) != 0 ? writer : TextWriter.Null);
-            Console.SetError((mask & 2) != 0 ? writer : TextWriter.Null);
+            ScriptConsole console = ScriptConsole.Requested(mask, source, file) ? new ScriptConsole() : null;
+            TextReader oldIn = console != null ? Console.In : null;
+            Console.SetOut(console != null ? console.Out : (mask & 1) != 0 ? writer : TextWriter.Null);
+            Console.SetError(console != null ? console.Out : (mask & 2) != 0 ? writer : TextWriter.Null);
+            if (console != null) Console.SetIn(console.In);
             // The script's awaits resume on the thread pool, not on this thread, which is waiting for them: with a
             // SynchronizationContext here (Keysharp's WinForms one, or WPF's once a window was shown) they would deadlock.
             var oldContext = System.Threading.SynchronizationContext.Current;
@@ -287,15 +304,254 @@ _CSharpHostSource() {
                 exitCode = result is int code ? code : 0;
             } catch (Exception ex) {
                 exitCode = ex.HResult;
-                Console.Error.WriteLine("Unhandled exception. " + Regex.Replace(ex.ToString(), @"\r?\n\s+at (System\.Reflection\.|CSHost\.)[^\r\n]*", ""));
+                string message = "Unhandled exception. " + Regex.Replace(ex.ToString(), @"\r?\n\s+at (System\.Reflection\.|CSHost\.)[^\r\n]*", "");
+                Console.Error.WriteLine(message);
+                if (console != null) writer.WriteLine(message);    // (the console closes with the script: CSOutput keeps it)
             } finally {
                 System.Threading.SynchronizationContext.SetSynchronizationContext(oldContext);
                 Console.SetOut(oldOut);
                 Console.SetError(oldErr);
+                if (console != null) {
+                    Console.SetIn(oldIn);
+                    console.Dispose();
+                }
             }
             if (AHK.HasResult) value = AHK.Format(AHK.Result);
             AHK.Reset();
             return output.ToString().TrimEnd();
+        }
+    }
+
+    // A console window for a script that needs one (CSConsole, or a "//#console" line): AutoHotkey is a GUI program
+    // and has none. The process's standard handles point to it while the script runs and are put back afterwards
+    // (AHK's FileAppend(..., "*") uses them too). Text is written and read with WriteConsoleW / ReadConsoleW, so that
+    // neither the console's code page nor .NET's cached console state matters.
+    // Closing a console window ends every process attached to it, AutoHotkey too, and that cannot be refused. So a
+    // click on the window's X button (and Alt+F4) is caught by a low-level mouse / keyboard hook before the console
+    // sees it, and becomes AHK.ConsoleClosed instead: the script ends itself, then the window closes.
+    sealed unsafe class ScriptConsole : IDisposable {
+        [DllImport("kernel32")] static extern int AllocConsole();
+        [DllImport("kernel32")] static extern int FreeConsole();
+        [DllImport("kernel32")] static extern IntPtr GetConsoleWindow();
+        [DllImport("kernel32")] static extern IntPtr GetStdHandle(int which);
+        [DllImport("kernel32")] static extern int SetStdHandle(int which, IntPtr handle);
+        [DllImport("kernel32", CharSet = CharSet.Unicode)]
+        static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+        [DllImport("kernel32")] static extern int CloseHandle(IntPtr handle);
+        [DllImport("kernel32")] static extern int SetConsoleCtrlHandler(delegate* unmanaged<uint, int> handler, int add);
+        [DllImport("kernel32")] static extern int WriteConsoleW(IntPtr handle, char* text, int count, out int written, IntPtr reserved);
+        [DllImport("kernel32")] static extern int ReadConsoleW(IntPtr handle, char* buffer, int count, out int read, IntPtr reserved);
+        [DllImport("kernel32")] static extern int WriteConsoleInputW(IntPtr handle, KeyInput* records, int count, out int written);
+        [DllImport("kernel32")] static extern IntPtr GetModuleHandleW(IntPtr name);
+        [DllImport("kernel32")] static extern uint GetCurrentThreadId();
+        [DllImport("user32")] static extern IntPtr SetWindowsHookExW(int type, delegate* unmanaged<int, nint, nint, nint> proc, IntPtr module, uint thread);
+        [DllImport("user32")] static extern int UnhookWindowsHookEx(IntPtr hook);
+        [DllImport("user32")] static extern nint CallNextHookEx(IntPtr hook, int code, nint wParam, nint lParam);
+        [DllImport("user32")] static extern int GetMessageW(byte* msg, IntPtr window, uint min, uint max);
+        [DllImport("user32")] static extern int PostThreadMessageW(uint thread, uint message, nint wParam, nint lParam);
+        [DllImport("user32")] static extern IntPtr WindowFromPoint(long point);
+        [DllImport("user32")] static extern IntPtr GetAncestor(IntPtr window, uint flags);
+        [DllImport("user32")] static extern IntPtr GetForegroundWindow();
+        [DllImport("user32")] static extern nint SendMessageTimeoutW(IntPtr window, uint message, nint wParam, nint lParam, uint flags, uint timeout, out nint result);
+        const int StdIn = -10, StdOut = -11, StdErr = -12;
+        const int HtSysMenu = 3, HtClose = 20;
+        static readonly Regex HeaderRx = new(@"^[ \t]*//[ \t]*#console[ \t]*\r?$", RegexOptions.Multiline);
+        static bool ctrlHandler;
+        static ScriptConsole current;    // (one script runs at a time: AutoHotkey waits for it)
+        readonly IntPtr oldIn, oldOut, oldErr, conIn, conOut, window;
+        readonly bool allocated;
+        readonly CancellationTokenSource closed = new();
+        readonly Reader reader;
+        Thread hookThread;
+        uint hookThreadId;
+        IntPtr mouseHook, keyboardHook;
+        bool closePressed, swallowUp;
+        public readonly TextWriter Out;
+        public readonly TextReader In;
+
+        // AHK.ConsoleClosed: canceled when the user closes the script's console window
+        public static CancellationToken ClosedToken => current?.closed.Token ?? CancellationToken.None;
+
+        // mask bit 4 (CSConsole), or a "//#console" line in the script itself
+        public static bool Requested(int mask, string source, string file) {
+            if ((mask & 4) != 0) return true;
+            try { return HeaderRx.IsMatch(source ?? File.ReadAllText(file)); } catch { return false; }
+        }
+
+        public ScriptConsole() {
+            oldIn = GetStdHandle(StdIn); oldOut = GetStdHandle(StdOut); oldErr = GetStdHandle(StdErr);
+            allocated = AllocConsole() != 0;    // (fails when the process already has a console: that one is used)
+            conOut = CreateFileW("CONOUT$", 0xC0000000, 3, IntPtr.Zero, 3, 0, IntPtr.Zero);
+            conIn = CreateFileW("CONIN$", 0xC0000000, 3, IntPtr.Zero, 3, 0, IntPtr.Zero);
+            if (conOut == new IntPtr(-1) || conIn == new IntPtr(-1)) {
+                if (conOut != new IntPtr(-1)) CloseHandle(conOut);
+                if (conIn != new IntPtr(-1)) CloseHandle(conIn);
+                if (allocated) FreeConsole();
+                throw new InvalidOperationException("Could not open a console window for the script.");
+            }
+            SetStdHandle(StdIn, conIn); SetStdHandle(StdOut, conOut); SetStdHandle(StdErr, conOut);
+            ResetRedirected();
+            if (!ctrlHandler) {
+                // Ctrl+C / Ctrl+Break would end the whole process (AutoHotkey too)
+                SetConsoleCtrlHandler(&OnCtrl, 1);
+                ctrlHandler = true;
+            }
+            window = GetConsoleWindow();
+            current = this;
+            if (allocated && window != IntPtr.Zero) StartHooks();
+            Out = TextWriter.Synchronized(new Writer(conOut));
+            reader = new Reader(conIn, closed.Token);
+            In = TextReader.Synchronized(reader);
+        }
+
+        public void Dispose() {
+            if (hookThread != null) {
+                PostThreadMessageW(hookThreadId, 0x12, 0, 0);    // WM_QUIT
+                hookThread.Join(2000);
+            }
+            current = null;
+            SetStdHandle(StdIn, oldIn); SetStdHandle(StdOut, oldOut); SetStdHandle(StdErr, oldErr);
+            CloseHandle(conIn); CloseHandle(conOut);
+            if (allocated) FreeConsole();
+            ResetRedirected();
+        }
+
+        [UnmanagedCallersOnly]
+        static int OnCtrl(uint type) => type <= 1 ? 1 : 0;    // CTRL_C_EVENT, CTRL_BREAK_EVENT: handled (ignored)
+
+        // Console.IsInputRedirected etc. are cached: Console.ReadKey and others would go by the old handles
+        static void ResetRedirected() {
+            try {
+                foreach (var field in typeof(Console).GetFields(BindingFlags.NonPublic | BindingFlags.Static))
+                    if (field.Name.Contains("Redirected") && !field.FieldType.IsValueType) field.SetValue(null, null);
+            } catch { }
+        }
+
+        // Low-level hooks run on the thread that set them, which needs a message loop: a thread of their own
+        void StartHooks() {
+            using var started = new ManualResetEventSlim();
+            hookThread = new Thread(() => {
+                hookThreadId = GetCurrentThreadId();
+                IntPtr module = GetModuleHandleW(IntPtr.Zero);
+                mouseHook = SetWindowsHookExW(14, &OnMouse, module, 0);       // WH_MOUSE_LL
+                keyboardHook = SetWindowsHookExW(13, &OnKeyboard, module, 0); // WH_KEYBOARD_LL
+                started.Set();
+                byte* msg = stackalloc byte[64];
+                while (GetMessageW(msg, IntPtr.Zero, 0, 0) > 0) { }
+                if (mouseHook != IntPtr.Zero) UnhookWindowsHookEx(mouseHook);
+                if (keyboardHook != IntPtr.Zero) UnhookWindowsHookEx(keyboardHook);
+            }) { IsBackground = true, Name = "Console close hook" };
+            hookThread.Start();
+            started.Wait(2000);
+        }
+
+        int HitTest(int x, int y) {
+            IntPtr target = WindowFromPoint(((long)y << 32) | (uint)x);
+            if (target == IntPtr.Zero || GetAncestor(target, 2) != window) return 0;    // GA_ROOT
+            nint lParam = ((y & 0xFFFF) << 16) | (x & 0xFFFF);
+            return SendMessageTimeoutW(window, 0x84, 0, lParam, 2, 200, out nint hit) != 0 ? (int)hit : 0;    // WM_NCHITTEST, SMTO_ABORTIFHUNG
+        }
+
+        // The X button closes (on release, like a button). The window icon is left alone too: its menu has Close, and a
+        // double click on it closes. Everything else passes on.
+        [UnmanagedCallersOnly]
+        static nint OnMouse(int code, nint wParam, nint lParam) {
+            var self = current;
+            if (code >= 0 && self != null) {
+                int x = *(int*)lParam, y = *((int*)lParam + 1), message = (int)wParam;
+                if (message == 0x201 || message == 0x204 || message == 0x207) {    // WM_LBUTTONDOWN, WM_RBUTTONDOWN, WM_MBUTTONDOWN
+                    int hit = self.HitTest(x, y);
+                    if (hit == HtClose || hit == HtSysMenu) {
+                        self.closePressed = hit == HtClose && message == 0x201;
+                        self.swallowUp = true;
+                        return 1;
+                    }
+                } else if ((message == 0x202 || message == 0x205 || message == 0x208) && self.swallowUp) {
+                    self.swallowUp = false;
+                    if (self.closePressed && message == 0x202 && self.HitTest(x, y) == HtClose) self.Close();
+                    self.closePressed = false;
+                    return 1;
+                }
+            }
+            return CallNextHookEx(IntPtr.Zero, code, wParam, lParam);
+        }
+
+        // Alt+F4 closes; Alt+Space (the window menu, which has Close) is kept from the console
+        [UnmanagedCallersOnly]
+        static nint OnKeyboard(int code, nint wParam, nint lParam) {
+            var self = current;
+            if (code >= 0 && self != null && wParam == 0x104 && GetForegroundWindow() == self.window) {    // WM_SYSKEYDOWN
+                int vk = *(int*)lParam;
+                if (vk == 0x73) { self.Close(); return 1; }    // F4
+                if (vk == 0x20) return 1;                        // Space
+            }
+            return CallNextHookEx(IntPtr.Zero, code, wParam, lParam);
+        }
+
+        // Signals AHK.ConsoleClosed (off the hook thread: the script's handlers may take their time) and ends a
+        // Console.ReadLine that is waiting
+        void Close() {
+            if (closed.IsCancellationRequested) return;
+            Task.Run(() => {
+                try { closed.Cancel(); } catch { }
+                if (reader.Waiting) {
+                    var keys = stackalloc KeyInput[2];
+                    keys[0] = new KeyInput { Type = 1, Down = 1, Repeat = 1, Vk = 13, Char = '\r' };
+                    keys[1] = keys[0];
+                    keys[1].Down = 0;
+                    WriteConsoleInputW(conIn, keys, 2, out _);
+                }
+            });
+        }
+
+        [StructLayout(LayoutKind.Explicit, Size = 20)]
+        struct KeyInput {    // INPUT_RECORD with a KEY_EVENT_RECORD
+            [FieldOffset(0)] public ushort Type;
+            [FieldOffset(4)] public int Down;
+            [FieldOffset(8)] public ushort Repeat;
+            [FieldOffset(10)] public ushort Vk;
+            [FieldOffset(12)] public ushort Scan;
+            [FieldOffset(14)] public char Char;
+            [FieldOffset(16)] public uint Control;
+        }
+
+        sealed class Writer : TextWriter {
+            readonly IntPtr handle;
+            public Writer(IntPtr handle) { this.handle = handle; }
+            public override Encoding Encoding => Encoding.Unicode;
+            public override void Write(char value) => Write(new ReadOnlySpan<char>(&value, 1));
+            public override void Write(char[] buffer, int index, int count) => Write(new ReadOnlySpan<char>(buffer, index, count));
+            public override void Write(string value) => Write(value.AsSpan());
+            public override void Write(ReadOnlySpan<char> text) {
+                fixed (char* p = text) {
+                    int done = 0;
+                    while (done < text.Length && WriteConsoleW(handle, p + done, Math.Min(text.Length - done, 8192), out int n, IntPtr.Zero) != 0 && n > 0)
+                        done += n;
+                }
+            }
+        }
+
+        // Console.In; after the window was closed it reports the end of input
+        sealed class Reader : TextReader {
+            readonly IntPtr handle;
+            readonly CancellationToken closed;
+            readonly char[] buffer = new char[4096];
+            int pos, len;
+            public volatile bool Waiting;
+            public Reader(IntPtr handle, CancellationToken closed) { this.handle = handle; this.closed = closed; }
+            bool Fill() {
+                if (closed.IsCancellationRequested) return false;
+                if (pos < len) return true;
+                pos = 0;
+                Waiting = true;
+                fixed (char* p = buffer)
+                    if (ReadConsoleW(handle, p, buffer.Length, out len, IntPtr.Zero) == 0) len = 0;
+                Waiting = false;
+                if (closed.IsCancellationRequested || len > 0 && buffer[0] == (char)26) len = 0;    // closed, or Ctrl+Z: end of input
+                return len > 0;
+            }
+            public override int Peek() => Fill() ? buffer[pos] : -1;
+            public override int Read() => Fill() ? buffer[pos++] : -1;
         }
     }
 
@@ -308,6 +564,9 @@ _CSharpHostSource() {
             Result = value;
             HasResult = true;
         }
+
+        // Canceled when the user closes the script's console window (console mode only): the script should end then
+        public static CancellationToken ConsoleClosed => ScriptConsole.ClosedToken;
 
         internal static void Reset() {
             Result = null;

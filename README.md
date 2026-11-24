@@ -25,6 +25,7 @@ MsgBox RunCsx('return "Hello from C# on .NET " + Environment.Version;')
   - **`Csx-in-AHK.ahk`**: C# script (`.csx`) syntax via the Roslyn scripting API, like `csi.exe` / `dotnet-script`.
 - **Values come back to AHK** as text that AHK can use directly: `bool` becomes `1`/`0`, numbers and dates use the invariant culture, and collections become one item per line.
 - **Console output is captured.** `Console.Out` and `Console.Error` are collected and returned or exposed in a global variable.
+- **Console apps work too.** A script that needs a real console (`Console.ReadLine`, `ReadKey`, Terminal.Gui, ...) gets its own console window (see [Console apps](#console-apps)).
 - **Compilation errors are thrown as AHK errors**, with the compiler diagnostics in the message.
 - **Directives:** `#r "Some.dll"`, `#r "nuget: Name, 1.2.3"`, `#:package Name@1.2.3` (NuGet packages, downloaded when missing), and `#load "Other.cs"`.
 - **Caching.** The host assembly is compiled once to `%TEMP%`, and compiled scripts are cached for the life of the AHK process. Both libraries also keep compiled scripts on disk, so a later start loads them instead of compiling again, and can ship them precompiled (see [Shipping a program](#shipping-a-program)).
@@ -100,6 +101,7 @@ Result := RunCSharpFile("script.cs", "arg1", "arg2")               ; always trea
 | `CSOutput` | Console output of the last script |
 | `CSExitCode` | The script's `int` return value, or the HRESULT of an unhandled exception |
 | `CSStreams` | Bitmask of captured streams: `1` = `Console.Out`, `2` = `Console.Error` (default `3`) |
+| `CSConsole` | `true`: scripts run in a console window (see [Console apps](#console-apps)). Default `false` |
 | `args` | Extra parameters passed to `RunCSharp` |
 
 ```ahk
@@ -145,6 +147,7 @@ MsgBox RunCsx('
 | Return value | The script's `return` value or final expression. If that is `null`, the console output is returned instead. |
 | `CsxOutput` | Console output of the last script |
 | `CsxStreams` | Bitmask of captured streams: `1` = `Console.Out`, `2` = `Console.Error` (default `3`) |
+| `CsxConsole` | `true`: scripts run in a console window (see [Console apps](#console-apps)). Default `false` |
 | `args` | Extra parameters passed to `RunCsx` |
 
 A script file is recompiled automatically when it, or any file it `#load`s, changes.
@@ -155,6 +158,31 @@ A script file is recompiled automatically when it, or any file it `#load`s, chan
 - **Relative paths** in directives are resolved against the script's folder, or the working directory for inline scripts.
 - **NuGet packages** are restored the way `dotnet run app.cs` restores them, including dependencies and native DLLs. See [NuGet packages](#nuget-packages).
 - **`Environment.Exit()`** inside a script also terminates AutoHotkey, because both run in the same process.
+
+## Console apps
+
+AutoHotkey is a GUI program and has no console window, so by default console output is captured and `Console.ReadLine()` gets nothing. A script that needs a real console gets one in either of these ways:
+
+- Set `CSConsole := true` (Csharp-in-AHK) or `CsxConsole := true` (Csx-in-AHK). Every script then gets a console.
+- Put a line that is just `//#console` in the script file. It is an ordinary comment, so `dotnet run` and other tools ignore it.
+
+```csharp
+//#console
+#:package Terminal.Gui@1.12.1
+using Terminal.Gui;
+
+Application.Init();
+// The console window's X button (or Alt+F4) cancels AHK.ConsoleClosed: stop the app then
+AHK.ConsoleClosed.Register(() => Application.MainLoop.Invoke(() => Application.RequestStop()));
+Application.Run(new Window("Hello"));
+Application.Shutdown();
+```
+
+- The console opens when the script starts and closes when it ends. AutoHotkey waits meanwhile.
+- `Console.Out`, `Console.Error` and `Console.In` all use the console, so `ReadLine`, `ReadKey` and text UI libraries work. Output does not go to `CSOutput` / `CsxOutput` then, but an unhandled exception is written to both.
+- **Closing the window.** Windows ends every process attached to a console when that console is closed, AutoHotkey included. So the window's X button and Alt+F4 are caught first and only cancel `AHK.ConsoleClosed`, a `CancellationToken`. A waiting `Console.ReadLine()` returns `null`. A script that waits some other way should end itself when the token is canceled, as above. The window then closes with the script.
+- The window menu (its icon, Alt+Space) is blocked, since it has Close too. Ctrl+C and Ctrl+Break are ignored for the same reason.
+- Closing the window any other way, such as the taskbar's "Close window", still ends AutoHotkey. So does closing the tab when Windows Terminal is set as the default terminal: the X button can only be caught in the classic console window.
 
 ## How it works
 
@@ -214,6 +242,8 @@ using Microsoft.Data.Sqlite;
 | [`wpf_ex1.ahk`](wpf_ex1.ahk) | Minimal WPF window that returns the user's input to AHK |
 | [`types_ex1.ahk`](types_ex1.ahk) | `RunCsx`: passing AHK integers, floats, strings, booleans, dates, arrays and Maps to C# and using the results in AHK |
 | [`cs_types_ex1.ahk`](cs_types_ex1.ahk) | The same with `RunCSharp` (top-level statements): results via `AHK.Return`, console output and the exit code, plus a local function and a `record` |
+| [`tgui1.ahk`](tgui1.ahk) / [`tgui.cs`](tgui.cs) | A [Terminal.Gui](https://github.com/gui-cs/Terminal.Gui) wizard in a console window (`//#console`) |
+| [`tgui2.ahk`](tgui2.ahk) / [`tgui2.cs`](tgui2.cs) | A Terminal.Gui login window that can be closed with the console's X button (`AHK.ConsoleClosed`); the user name is returned to AHK |
 | [`Example.csx`](Example.csx) / [`ExampleHelpers.csx`](ExampleHelpers.csx) | A script file that uses `#load` to pull in helper functions and classes |
 | [`pynet1.ahk`](pynet1.ahk) / [`pynet1.cs`](pynet1.cs) | Python inside AutoHotkey through [Python.NET](https://github.com/pythonnet/pythonnet): calling Python functions from C#, `import math`, `eval`, `print()` captured in the output |
 | [`pyplot1.ahk`](pyplot1.ahk) / [`pyplot1.cs`](pyplot1.cs) | WinForms and matplotlib in one window: five plots (3D surface, Lissajous, polar rose, Mandelbrot, complex phase field) with live sliders, colormaps, dark theme, animation and PNG export. The saved file's path is returned to AHK |
